@@ -1,0 +1,1 @@
+print("Nail AI project started!")
