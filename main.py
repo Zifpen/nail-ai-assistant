@@ -8,7 +8,7 @@ Provides REST API endpoints for:
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime
 
 # Import database and scheduler functions
@@ -58,7 +58,7 @@ class BookAppointmentResponse(BaseModel):
     """Response model for booking an appointment"""
     success: bool
     appointment_id: int = None
-    error: str = None
+    error: Optional[str] = None
 
 
 # ============================================================================
