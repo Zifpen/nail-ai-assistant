@@ -4,15 +4,23 @@ FastAPI application for nail salon booking system.
 Provides REST API endpoints for:
 - Retrieving available appointment slots
 - Creating new appointments with slot validation
+- User registration and authentication
 """
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime
+import bcrypt
+import jwt
 
 # Import database and scheduler functions
-from database import get_appointments_for_day, create_appointment_if_available
+from database import (
+    get_appointments_for_day, 
+    create_appointment_if_available,
+    insert_user,
+    get_user_by_phone
+)
 from scheduler import get_available_slots
 
 
@@ -60,6 +68,31 @@ class BookAppointmentResponse(BaseModel):
     appointment_id: int = None
     error: Optional[str] = None
 
+class RegisterRequest(BaseModel):
+    """Request model for user registration"""
+    name: str
+    phone: str
+    password: str
+    role: str  # 'client', 'stylist', 'admin'
+
+
+class RegisterResponse(BaseModel):
+    """Response model for user registration"""
+    user_id: int
+    message: str
+
+
+class LoginRequest(BaseModel):
+    """Request model for user login"""
+    phone: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    """Response model for user login"""
+    token: str
+    user_id: int
+    role: str
 
 # ============================================================================
 # Configuration Constants
@@ -73,6 +106,10 @@ WORKING_HOURS = {
 
 # Minimum service duration (minutes)
 MIN_SERVICE_DURATION = 45
+
+# JWT Secret Key (in production, use environment variable)
+JWT_SECRET_KEY = "your-secret-key-here"
+JWT_ALGORITHM = "HS256"
 
 
 # ============================================================================
@@ -290,6 +327,136 @@ def book_appointment(request: BookAppointmentRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error processing appointment booking: {str(e)}"
+        )
+
+
+@app.post(
+    "/register",
+    response_model=RegisterResponse,
+    tags=["Authentication"]
+)
+def register_user(request: RegisterRequest):
+    """
+    Register a new user.
+    
+    This endpoint creates a new user account with hashed password.
+    
+    Request Body (JSON):
+        {
+            "name": "Anna",
+            "phone": "1234567890",
+            "password": "123456",
+            "role": "stylist"
+        }
+    
+    Returns:
+        RegisterResponse: JSON with user_id and success message
+        
+    Raises:
+        HTTPException: If validation fails or user already exists
+    """
+    try:
+        # Validate role
+        valid_roles = ["client", "stylist", "admin"]
+        if request.role not in valid_roles:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}"
+            )
+        
+        # Validate phone format (basic check)
+        if not request.phone or len(request.phone) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Phone number must be at least 10 digits"
+            )
+        
+        # Hash password
+        password_hash = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Insert user
+        user_id = insert_user(
+            name=request.name,
+            phone=request.phone,
+            password_hash=password_hash,
+            role=request.role
+        )
+        
+        return RegisterResponse(
+            user_id=user_id,
+            message=f"User {request.name} registered successfully as {request.role}"
+        )
+        
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            raise HTTPException(
+                status_code=400,
+                detail="Phone number already registered"
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error registering user: {str(e)}"
+        )
+
+
+@app.post(
+    "/login",
+    response_model=LoginResponse,
+    tags=["Authentication"]
+)
+def login_user(request: LoginRequest):
+    """
+    Authenticate a user and return JWT token.
+    
+    This endpoint verifies user credentials and returns a JWT token.
+    
+    Request Body (JSON):
+        {
+            "phone": "1234567890",
+            "password": "123456"
+        }
+    
+    Returns:
+        LoginResponse: JSON with JWT token, user_id, and role
+        
+    Raises:
+        HTTPException: If credentials are invalid
+    """
+    try:
+        # Get user by phone
+        user = get_user_by_phone(request.phone)
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid phone number or password"
+            )
+        
+        # Verify password
+        if not bcrypt.checkpw(request.password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid phone number or password"
+            )
+        
+        # Generate JWT token
+        token_payload = {
+            "user_id": user['id'],
+            "role": user['role']
+        }
+        token = jwt.encode(token_payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+        
+        return LoginResponse(
+            token=token,
+            user_id=user['id'],
+            role=user['role']
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during login: {str(e)}"
         )
 
 

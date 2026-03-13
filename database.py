@@ -51,6 +51,7 @@ def init_database() -> None:
     cursor = conn.cursor()
     
     try:
+        # Appointments table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +59,55 @@ def init_database() -> None:
                 service_name TEXT NOT NULL,
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL
+            )
+        """)
+        
+        # Users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('client', 'stylist', 'admin')),
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        # Stylists table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stylists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bio TEXT,
+                experience_years INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+        
+        # Services table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS services (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                category TEXT,
+                description TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        # Stylist services table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stylist_services (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stylist_id INTEGER NOT NULL,
+                service_id INTEGER NOT NULL,
+                duration INTEGER NOT NULL,
+                price REAL,
+                buffer_time INTEGER DEFAULT 0,
+                FOREIGN KEY (stylist_id) REFERENCES stylists (id),
+                FOREIGN KEY (service_id) REFERENCES services (id)
             )
         """)
         
@@ -287,6 +337,173 @@ def clear_all_appointments() -> int:
         
     except sqlite3.Error as e:
         print(f"Error clearing appointments: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def insert_user(name: str, phone: str, password_hash: str, role: str) -> int:
+    """
+    Insert a new user into the database.
+    
+    Args:
+        name (str): User's name
+        phone (str): User's phone number (unique)
+        password_hash (str): Hashed password
+        role (str): User role ('client', 'stylist', 'admin')
+        
+    Returns:
+        int: User ID of the newly inserted user
+        
+    Raises:
+        sqlite3.IntegrityError: If phone number already exists
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        created_at = datetime.now().isoformat()
+        cursor.execute("""
+            INSERT INTO users (name, phone, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, phone, password_hash, role, created_at))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error inserting user: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_user_by_phone(phone: str) -> Dict:
+    """
+    Retrieve a user by phone number.
+    
+    Args:
+        phone (str): User's phone number
+        
+    Returns:
+        Dict: User data with keys: id, name, phone, password_hash, role, created_at
+        Returns empty dict if user not found
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT id, name, phone, password_hash, role, created_at
+            FROM users
+            WHERE phone = ?
+        """, (phone,))
+        
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+        
+    except sqlite3.Error as e:
+        print(f"Error retrieving user: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def insert_service(name: str, category: str, description: str) -> int:
+    """
+    Insert a new service into the database.
+    
+    Args:
+        name (str): Service name (unique)
+        category (str): Service category
+        description (str): Service description
+        
+    Returns:
+        int: Service ID of the newly inserted service
+        
+    Raises:
+        sqlite3.IntegrityError: If service name already exists
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        created_at = datetime.now().isoformat()
+        cursor.execute("""
+            INSERT INTO services (name, category, description, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (name, category, description, created_at))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error inserting service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def insert_stylist_service(stylist_id: int, service_id: int, duration: int, price: float, buffer_time: int = 0) -> int:
+    """
+    Insert a new stylist service into the database.
+    
+    Args:
+        stylist_id (int): ID of the stylist
+        service_id (int): ID of the service
+        duration (int): Duration in minutes
+        price (float): Price of the service
+        buffer_time (int): Buffer time in minutes (default 0)
+        
+    Returns:
+        int: ID of the newly inserted stylist service
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            INSERT INTO stylist_services (stylist_id, service_id, duration, price, buffer_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (stylist_id, service_id, duration, price, buffer_time))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error inserting stylist service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def insert_stylist(user_id: int, bio: str, experience_years: int) -> int:
+    """
+    Insert a new stylist into the database.
+    
+    Args:
+        user_id (int): ID of the user (must be a stylist role)
+        bio (str): Stylist bio
+        experience_years (int): Years of experience
+        
+    Returns:
+        int: ID of the newly inserted stylist
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        created_at = datetime.now().isoformat()
+        cursor.execute("""
+            INSERT INTO stylists (user_id, bio, experience_years, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, bio, experience_years, created_at))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error inserting stylist: {e}")
         raise
     finally:
         conn.close()
