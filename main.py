@@ -21,8 +21,10 @@ from database import (
     insert_user,
     get_user_by_phone,
     get_service_by_name,
+    get_service_by_id,
     create_service,
-    create_stylist_service
+    create_stylist_service,
+    get_stylist_service
 )
 from scheduler import get_available_slots
 
@@ -58,10 +60,10 @@ class AvailableSlotsResponse(BaseModel):
 class BookAppointmentRequest(BaseModel):
     """Request model for booking an appointment"""
     client_name: str
-    service_name: str
+    stylist_id: int
+    service_id: int
     start_time: str  # YYYY-MM-DD HH:MM format
     end_time: str    # YYYY-MM-DD HH:MM format
-    service_duration: int  # Duration in minutes
     date: str  # YYYY-MM-DD format
 
 
@@ -158,23 +160,25 @@ def read_root():
 )
 def get_available_slots_endpoint(
     date: str = Query(..., description="Date in YYYY-MM-DD format"),
-    service_duration: int = Query(..., description="Service duration in minutes")
+    stylist_id: int = Query(..., description="Stylist ID"),
+    service_id: int = Query(..., description="Service ID")
 ):
     """
-    Get all available appointment slots for a given date and service duration.
+    Get all available appointment slots for a given date, stylist, and service.
     
-    This endpoint retrieves existing appointments for the date, then generates
+    This endpoint retrieves the stylist's service configuration, then generates
     all valid available time slots that can accommodate the requested service.
     
     Query Parameters:
         - date (str): Appointment date in YYYY-MM-DD format (e.g., "2026-03-12")
-        - service_duration (int): Service duration in minutes (e.g., 60)
+        - stylist_id (int): ID of the stylist
+        - service_id (int): ID of the service
     
     Returns:
         AvailableSlotsResponse: JSON with date, total slots count, and list of available slots
         
     Example:
-        GET /available-slots?date=2026-03-12&service_duration=60
+        GET /available-slots?date=2026-03-12&stylist_id=1&service_id=2
         
         Response:
         {
@@ -187,7 +191,7 @@ def get_available_slots_endpoint(
         }
     
     Raises:
-        HTTPException: If date format is invalid or service_duration is invalid
+        HTTPException: If date format is invalid or stylist does not offer the service
     """
     try:
         # Validate date format
@@ -199,17 +203,22 @@ def get_available_slots_endpoint(
                 detail="Invalid date format. Use YYYY-MM-DD (e.g., 2026-03-12)"
             )
         
-        # Validate service_duration
-        if service_duration <= 0:
+        # STEP 1: Retrieve stylist service configuration
+        stylist_service = get_stylist_service(stylist_id, service_id)
+        
+        if not stylist_service:
             raise HTTPException(
                 status_code=400,
-                detail="Service duration must be greater than 0 minutes"
+                detail="Service not offered by this stylist"
             )
         
-        # STEP 1: Retrieve existing appointments for the date
+        # Extract duration from stylist service configuration
+        service_duration = stylist_service["duration"]
+        
+        # STEP 2: Retrieve existing appointments for the date
         existing_appointments = get_appointments_for_day(date)
         
-        # STEP 2: Get all available slots for this date and service duration
+        # STEP 3: Get all available slots for this date and service duration
         available_slots = get_available_slots(
             appointments=existing_appointments,
             service_duration=service_duration,
@@ -218,7 +227,7 @@ def get_available_slots_endpoint(
             date=date
         )
         
-        # STEP 3: Return formatted response
+        # STEP 4: Return formatted response
         return AvailableSlotsResponse(
             date=date,
             total_slots=len(available_slots),
@@ -250,10 +259,10 @@ def book_appointment(request: BookAppointmentRequest):
     Request Body (JSON):
         {
             "client_name": "Alice Johnson",
-            "service_name": "Manicure",
+            "stylist_id": 1,
+            "service_id": 2,
             "start_time": "2026-03-12 10:00",
             "end_time": "2026-03-12 11:00",
-            "service_duration": 60,
             "date": "2026-03-12"
         }
     
@@ -304,25 +313,34 @@ def book_appointment(request: BookAppointmentRequest):
                 detail="Client name is required"
             )
         
-        if not request.service_name or not request.service_name.strip():
+        # STEP 1: Retrieve stylist service configuration
+        stylist_service = get_stylist_service(request.stylist_id, request.service_id)
+        
+        if not stylist_service:
             raise HTTPException(
                 status_code=400,
-                detail="Service name is required"
+                detail="Service not offered by this stylist"
             )
         
-        if request.service_duration <= 0:
+        # Extract duration from stylist service configuration
+        service_duration = stylist_service["duration"]
+        
+        # STEP 2: Get service name for database storage
+        service_info = get_service_by_id(request.service_id)
+        if not service_info:
             raise HTTPException(
                 status_code=400,
-                detail="Service duration must be greater than 0 minutes"
+                detail="Invalid service ID"
             )
+        service_name = service_info["name"]
         
         # Call create_appointment_if_available with validation
         result = create_appointment_if_available(
             client_name=request.client_name,
-            service_name=request.service_name,
+            service_name=service_name,
             start_time=request.start_time,
             end_time=request.end_time,
-            service_duration=request.service_duration,
+            service_duration=service_duration,
             working_hours=WORKING_HOURS,
             min_service_duration=MIN_SERVICE_DURATION,
             date=request.date

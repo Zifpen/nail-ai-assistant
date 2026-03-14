@@ -540,6 +540,37 @@ def get_service_by_name(name: str) -> Dict:
         conn.close()
 
 
+def get_service_by_id(service_id: int) -> Dict:
+    """
+    Retrieve a service by ID.
+    
+    Args:
+        service_id (int): Service ID
+        
+    Returns:
+        Dict: Service data with keys: id, name, category, description, created_at
+        Returns empty dict if service not found
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT id, name, category, description, created_at
+            FROM services
+            WHERE id = ?
+        """, (service_id,))
+        
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+        
+    except sqlite3.Error as e:
+        print(f"Error retrieving service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def create_service(name: str, category: str = None, description: str = None) -> int:
     """
     Create a new service in the database.
@@ -719,6 +750,44 @@ def create_appointment_if_available(
             "success": False,
             "error": error_message
         }
+
+
+def get_stylist_service(stylist_id: int, service_id: int) -> Dict:
+    """
+    Retrieve stylist service configuration by stylist and service IDs.
+    
+    Args:
+        stylist_id (int): ID of the stylist
+        service_id (int): ID of the service
+        
+    Returns:
+        Dict: Service configuration with keys: duration, buffer_time
+        Returns empty dict if stylist does not offer the service
+        
+    Example:
+        >>> config = get_stylist_service(1, 2)
+        >>> print(config)
+        {"duration": 60, "buffer_time": 15}
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT duration, buffer_time
+            FROM stylist_services
+            WHERE stylist_id = ?
+            AND service_id = ?
+        """, (stylist_id, service_id))
+        
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+        
+    except sqlite3.Error as e:
+        print(f"Error retrieving stylist service: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
