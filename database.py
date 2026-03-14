@@ -592,6 +592,62 @@ def get_all_services() -> List[Dict]:
         conn.close()
 
 
+def get_all_stylists() -> List[Dict]:
+    """Retrieve all stylists with their user information.
+
+    Returns:
+        List[Dict]: List of stylists with keys: id, user_id, name, bio, experience_years, created_at
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT s.id, s.user_id, u.name, s.bio, s.experience_years, s.created_at
+            FROM stylists s
+            JOIN users u ON s.user_id = u.id
+            ORDER BY u.name ASC
+        """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    except sqlite3.Error as e:
+        print(f"Error retrieving stylists: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_services_for_stylist(stylist_id: int) -> List[Dict]:
+    """Retrieve services offered by a specific stylist.
+
+    Args:
+        stylist_id (int): The stylist's ID
+
+    Returns:
+        List[Dict]: List of services with keys: service_id, name, duration, price, buffer_time
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT ss.service_id, s.name, ss.duration, ss.price, ss.buffer_time
+            FROM stylist_services ss
+            JOIN services s ON ss.service_id = s.id
+            WHERE ss.stylist_id = ?
+            ORDER BY s.name ASC
+        """, (stylist_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    except sqlite3.Error as e:
+        print(f"Error retrieving stylist services: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def get_service_by_id(service_id: int) -> Dict:
     """
     Retrieve a service by ID.

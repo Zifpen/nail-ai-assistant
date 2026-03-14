@@ -25,7 +25,10 @@ from database import (
     create_service,
     create_stylist_service,
     create_stylist_profile,
-    get_stylist_service
+    get_stylist_service,
+    get_all_services,
+    get_all_stylists,
+    get_services_for_stylist
 )
 from service_resolver import resolve_service_name
 from scheduler import get_available_slots
@@ -558,6 +561,75 @@ def stylist_onboarding_services(request: StylistOnboardingRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error during stylist onboarding: {str(e)}"
+        )
+
+
+@app.get(
+    "/services",
+    response_model=List[Dict[str, str]],
+    tags=["Services"]
+)
+def get_services():
+    """
+    Get all available services.
+    
+    Returns:
+        List[Dict]: List of services with id and name
+    """
+    try:
+        services = get_all_services()
+        return [{"id": s["id"], "name": s["name"]} for s in services]
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving services: {str(e)}"
+        )
+
+
+@app.get(
+    "/stylists",
+    response_model=List[Dict[str, str]],
+    tags=["Stylists"]
+)
+def get_stylists():
+    """
+    Get all stylists.
+    
+    Returns:
+        List[Dict]: List of stylists with id and name
+    """
+    try:
+        stylists = get_all_stylists()
+        return [{"id": s["id"], "name": s["name"]} for s in stylists]
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving stylists: {str(e)}"
+        )
+
+
+@app.get(
+    "/stylists/{stylist_id}/services",
+    response_model=List[Dict],
+    tags=["Stylists"]
+)
+def get_stylist_services(stylist_id: int):
+    """
+    Get services offered by a specific stylist.
+    
+    Args:
+        stylist_id (int): The stylist's ID
+        
+    Returns:
+        List[Dict]: List of services with service_id, name, duration
+    """
+    try:
+        services = get_services_for_stylist(stylist_id)
+        return [{"service_id": s["service_id"], "name": s["name"], "duration": s["duration"]} for s in services]
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving stylist services: {str(e)}"
         )
 
 

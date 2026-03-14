@@ -83,6 +83,33 @@ def book_appointment(client_name, service_name, start_time, end_time, service_du
     resp.raise_for_status()
     return resp.json()
 
+def get_services():
+    """
+    Call the backend API to get all available services.
+    """
+    resp = requests.get(f"{API_BASE}/services")
+    resp.raise_for_status()
+    return resp.json()
+
+def get_stylists():
+    """
+    Call the backend API to get all stylists.
+    """
+    resp = requests.get(f"{API_BASE}/stylists")
+    resp.raise_for_status()
+    return resp.json()
+
+def get_stylist_services(stylist_id: int):
+    """
+    Call the backend API to get services offered by a specific stylist.
+    
+    Args:
+        stylist_id (int): The stylist's ID
+    """
+    resp = requests.get(f"{API_BASE}/stylists/{stylist_id}/services")
+    resp.raise_for_status()
+    return resp.json()
+
 # Tool schema for OpenAI tool calling
 TOOLS = [
     {
@@ -116,6 +143,44 @@ TOOLS = [
                     "date": {"type": "string"}
                 },
                 "required": ["client_name", "service_name", "start_time", "end_time", "service_duration", "date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_services",
+            "description": "Get all available services in the salon.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stylists",
+            "description": "Get all stylists working at the salon.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stylist_services",
+            "description": "Get services offered by a specific stylist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "stylist_id": {"type": "integer", "description": "The stylist's ID"}
+                },
+                "required": ["stylist_id"]
             }
         }
     }
@@ -205,6 +270,12 @@ def run_agent():
                     result = get_available_slots(**tool_args)
                 elif name == "book_appointment":
                     result = book_appointment(**tool_args)
+                elif name == "get_services":
+                    result = get_services()
+                elif name == "get_stylists":
+                    result = get_stylists()
+                elif name == "get_stylist_services":
+                    result = get_stylist_services(**tool_args)
                 else:
                     result = {"error": f"Unknown tool: {name}"}
 
