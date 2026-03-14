@@ -509,6 +509,34 @@ def insert_stylist(user_id: int, bio: str, experience_years: int) -> int:
         conn.close()
 
 
+def create_stylist_profile(user_id: int) -> int:
+    """Create an empty stylist profile for a new stylist user.
+
+    Args:
+        user_id (int): ID of the stylist user
+
+    Returns:
+        int: ID of the newly created stylist record
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO stylists (user_id, bio, experience_years, created_at)
+            VALUES (?, '', 0, datetime('now'))
+        """, (user_id,))
+
+        conn.commit()
+        return cursor.lastrowid
+
+    except sqlite3.Error as e:
+        print(f"Error creating stylist profile: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def get_service_by_name(name: str) -> Dict:
     """
     Retrieve a service by name.

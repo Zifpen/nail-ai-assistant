@@ -24,6 +24,7 @@ from database import (
     get_service_by_id,
     create_service,
     create_stylist_service,
+    create_stylist_profile,
     get_stylist_service
 )
 from scheduler import get_available_slots
@@ -420,6 +421,10 @@ def register_user(request: RegisterRequest):
             password_hash=password_hash,
             role=request.role
         )
+
+        # If the user is a stylist, create a stylist profile record
+        if request.role == "stylist":
+            create_stylist_profile(user_id)
         
         return RegisterResponse(
             user_id=user_id,
