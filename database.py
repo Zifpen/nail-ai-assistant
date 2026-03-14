@@ -538,9 +538,8 @@ def create_stylist_profile(user_id: int) -> int:
 
 
 def get_service_by_name(name: str) -> Dict:
-    """
-    Retrieve a service by name.
-    
+    """Retrieve a service by name.
+
     Args:
         name (str): Service name
         
@@ -563,6 +562,31 @@ def get_service_by_name(name: str) -> Dict:
         
     except sqlite3.Error as e:
         print(f"Error retrieving service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_all_services() -> List[Dict]:
+    """Retrieve all services from the database.
+
+    Returns:
+        List[Dict]: List of services with keys: id, name, category, description, created_at
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT id, name, category, description, created_at
+            FROM services
+            ORDER BY name ASC
+        """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    except sqlite3.Error as e:
+        print(f"Error retrieving services: {e}")
         raise
     finally:
         conn.close()

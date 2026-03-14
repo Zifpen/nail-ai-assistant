@@ -27,6 +27,7 @@ from database import (
     create_stylist_profile,
     get_stylist_service
 )
+from service_resolver import resolve_service_name
 from scheduler import get_available_slots
 
 
@@ -535,17 +536,9 @@ def stylist_onboarding_services(request: StylistOnboardingRequest):
         services_added = 0
         
         for service_item in request.services:
-            # Check if service exists
-            service = get_service_by_name(service_item.name.lower().strip())
-            
-            if not service:
-                # Create new service
-                service_id = create_service(
-                    name=service_item.name.lower().strip(),
-                    category="nail_service"  # Default category
-                )
-            else:
-                service_id = service['id']
+            # Resolve stylist-provided service name into a canonical service record
+            resolved = resolve_service_name(service_item.name)
+            service_id = resolved["service_id"]
             
             # Create stylist service record
             create_stylist_service(
