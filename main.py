@@ -19,7 +19,10 @@ from database import (
     get_appointments_for_day, 
     create_appointment_if_available,
     insert_user,
-    get_user_by_phone
+    get_user_by_phone,
+    get_service_by_name,
+    create_service,
+    create_stylist_service
 )
 from scheduler import get_available_slots
 
@@ -93,6 +96,24 @@ class LoginResponse(BaseModel):
     token: str
     user_id: int
     role: str
+
+
+class ServiceItem(BaseModel):
+    """Model for a service with duration"""
+    name: str
+    duration: int
+
+
+class StylistOnboardingRequest(BaseModel):
+    """Request model for stylist service onboarding"""
+    stylist_id: int
+    services: List[ServiceItem]
+
+
+class StylistOnboardingResponse(BaseModel):
+    """Response model for stylist onboarding"""
+    message: str
+    services_added: int
 
 # ============================================================================
 # Configuration Constants
@@ -457,6 +478,70 @@ def login_user(request: LoginRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error during login: {str(e)}"
+        )
+
+
+@app.post(
+    "/stylist/onboarding/services",
+    response_model=StylistOnboardingResponse,
+    tags=["Stylist Onboarding"]
+)
+def stylist_onboarding_services(request: StylistOnboardingRequest):
+    """
+    Onboard stylist services.
+    
+    This endpoint allows stylists to configure their offered services.
+    It checks if services exist, creates them if needed, and links them to the stylist.
+    
+    Request Body (JSON):
+        {
+            "stylist_id": 1,
+            "services": [
+                {"name": "gel manicure", "duration": 60},
+                {"name": "hard gel", "duration": 90}
+            ]
+        }
+    
+    Returns:
+        StylistOnboardingResponse: Success message and count of services added
+        
+    Raises:
+        HTTPException: If stylist_id is invalid or other errors occur
+    """
+    try:
+        services_added = 0
+        
+        for service_item in request.services:
+            # Check if service exists
+            service = get_service_by_name(service_item.name.lower().strip())
+            
+            if not service:
+                # Create new service
+                service_id = create_service(
+                    name=service_item.name.lower().strip(),
+                    category="nail_service"  # Default category
+                )
+            else:
+                service_id = service['id']
+            
+            # Create stylist service record
+            create_stylist_service(
+                stylist_id=request.stylist_id,
+                service_id=service_id,
+                duration=service_item.duration
+            )
+            
+            services_added += 1
+        
+        return StylistOnboardingResponse(
+            message=f"Successfully onboarded {services_added} services for stylist {request.stylist_id}",
+            services_added=services_added
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during stylist onboarding: {str(e)}"
         )
 
 

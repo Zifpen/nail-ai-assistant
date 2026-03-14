@@ -509,6 +509,105 @@ def insert_stylist(user_id: int, bio: str, experience_years: int) -> int:
         conn.close()
 
 
+def get_service_by_name(name: str) -> Dict:
+    """
+    Retrieve a service by name.
+    
+    Args:
+        name (str): Service name
+        
+    Returns:
+        Dict: Service data with keys: id, name, category, description, created_at
+        Returns empty dict if service not found
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT id, name, category, description, created_at
+            FROM services
+            WHERE name = ?
+        """, (name,))
+        
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+        
+    except sqlite3.Error as e:
+        print(f"Error retrieving service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def create_service(name: str, category: str = None, description: str = None) -> int:
+    """
+    Create a new service in the database.
+    
+    Args:
+        name (str): Service name (unique)
+        category (str): Service category (optional)
+        description (str): Service description (optional)
+        
+    Returns:
+        int: Service ID of the newly created service
+        
+    Raises:
+        sqlite3.IntegrityError: If service name already exists
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        created_at = datetime.now().isoformat()
+        cursor.execute("""
+            INSERT INTO services (name, category, description, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (name, category, description, created_at))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error creating service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def create_stylist_service(stylist_id: int, service_id: int, duration: int, price: float = None, buffer_time: int = 0) -> int:
+    """
+    Create a stylist service record.
+    
+    Args:
+        stylist_id (int): ID of the stylist
+        service_id (int): ID of the service
+        duration (int): Duration in minutes
+        price (float): Price (optional)
+        buffer_time (int): Buffer time in minutes (default 0)
+        
+    Returns:
+        int: ID of the newly created stylist service record
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            INSERT INTO stylist_services (stylist_id, service_id, duration, price, buffer_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (stylist_id, service_id, duration, price, buffer_time))
+        
+        conn.commit()
+        return cursor.lastrowid
+        
+    except sqlite3.Error as e:
+        print(f"Error creating stylist service: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def create_appointment_if_available(
     client_name: str,
     service_name: str,
