@@ -578,8 +578,9 @@ def get_all_services() -> List[Dict]:
 
     try:
         cursor.execute("""
-            SELECT id, name, category, description, created_at
+            SELECT DISTINCT name, MIN(id) as id, MIN(category) as category, MIN(description) as description, MIN(created_at) as created_at
             FROM services
+            GROUP BY name
             ORDER BY name ASC
         """)
         rows = cursor.fetchall()
@@ -603,9 +604,10 @@ def get_all_stylists() -> List[Dict]:
 
     try:
         cursor.execute("""
-            SELECT s.id, s.user_id, u.name, s.bio, s.experience_years, s.created_at
+            SELECT DISTINCT u.name, MIN(s.id) as id, MIN(s.user_id) as user_id, MIN(s.bio) as bio, MIN(s.experience_years) as experience_years, MIN(s.created_at) as created_at
             FROM stylists s
             JOIN users u ON s.user_id = u.id
+            GROUP BY u.name
             ORDER BY u.name ASC
         """)
         rows = cursor.fetchall()

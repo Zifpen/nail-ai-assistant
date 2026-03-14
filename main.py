@@ -566,7 +566,6 @@ def stylist_onboarding_services(request: StylistOnboardingRequest):
 
 @app.get(
     "/services",
-    response_model=List[Dict[str, str]],
     tags=["Services"]
 )
 def get_services():
@@ -588,7 +587,6 @@ def get_services():
 
 @app.get(
     "/stylists",
-    response_model=List[Dict[str, str]],
     tags=["Stylists"]
 )
 def get_stylists():
@@ -610,7 +608,6 @@ def get_stylists():
 
 @app.get(
     "/stylists/{stylist_id}/services",
-    response_model=List[Dict],
     tags=["Stylists"]
 )
 def get_stylist_services(stylist_id: int):

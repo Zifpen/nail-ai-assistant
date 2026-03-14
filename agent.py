@@ -1,21 +1,24 @@
 """
 LLM-powered AI Booking Agent for Nail Salon
 
-This agent uses the OpenAI API with tool calling to interact with users,
-retrieve available slots, and book appointments via the FastAPI backend.
+This agent uses a structured three-layer architecture:
+1. Intent Layer: Analyzes user messages and detects intent
+2. Planner: Generates action plans based on detected intents
+3. Tool Executor: Executes tools in sequence
 
-Tools:
-- get_available_slots: GET /available-slots
-- book_appointment: POST /book
-
-System prompt ensures the agent never invents times and always checks availability.
+The agent combines structured planning with LLM-powered natural language responses.
 """
+
 
 import os
 import requests
 import openai
 from dotenv import load_dotenv
 from datetime import datetime
+from typing import Dict, Any
+from intent_layer import analyze_intent
+from planner import create_plan
+from tool_executor import execute_actions
 load_dotenv()
 
 # Set your OpenAI API key (use environment variable for security)
@@ -33,193 +36,147 @@ today = datetime.now().strftime("%Y-%m-%d")
 current_time = datetime.now().strftime("%H:%M")
 
 # -------------------------------
-# Tool Definitions
-# -------------------------------
-
-def get_available_slots(date: str, service_duration: int):
-    """
-    Call the backend API to get available slots.
-    """
-    params = {"date": date, "service_duration": service_duration}
-    resp = requests.get(f"{API_BASE}/available-slots", params=params)
-    resp.raise_for_status()
-    return resp.json()
-
-def book_appointment(client_name, service_name, start_time, end_time, service_duration, date):
-    """
-    Call the backend API to book an appointment.
-    Ensures time format is 'YYYY-MM-DD HH:MM'.
-    """
-    from datetime import datetime
-    def to_required_format(dt_str):
-        # Remove 'T' if present and split off seconds if present
-        dt_str = dt_str.replace('T', ' ')
-        if len(dt_str) > 16:
-            dt_str = dt_str[:16]
-        # Try parsing to ensure it's valid
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(dt_str, fmt)
-                return dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                continue
-        return dt_str  # fallback
-
-    start_time_fmt = to_required_format(str(start_time))
-    end_time_fmt = to_required_format(str(end_time))
-
-    payload = {
-        "client_name": client_name,
-        "service_name": service_name,
-        "start_time": start_time_fmt,
-        "end_time": end_time_fmt,
-        "service_duration": service_duration,
-        "date": date
-    }
-    print("Booking payload:", payload)  # Debug print
-    resp = requests.post(f"{API_BASE}/book", json=payload)
-    if resp.status_code != 200:
-        print("Error response from /book:", resp.text)  # Debug print
-    resp.raise_for_status()
-    return resp.json()
-
-def get_services():
-    """
-    Call the backend API to get all available services.
-    """
-    resp = requests.get(f"{API_BASE}/services")
-    resp.raise_for_status()
-    return resp.json()
-
-def get_stylists():
-    """
-    Call the backend API to get all stylists.
-    """
-    resp = requests.get(f"{API_BASE}/stylists")
-    resp.raise_for_status()
-    return resp.json()
-
-def get_stylist_services(stylist_id: int):
-    """
-    Call the backend API to get services offered by a specific stylist.
-    
-    Args:
-        stylist_id (int): The stylist's ID
-    """
-    resp = requests.get(f"{API_BASE}/stylists/{stylist_id}/services")
-    resp.raise_for_status()
-    return resp.json()
-
-# Tool schema for OpenAI tool calling
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_available_slots",
-            "description": "Retrieve available booking time slots.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
-                    "service_duration": {"type": "integer", "description": "Service duration in minutes"}
-                },
-                "required": ["date", "service_duration"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "book_appointment",
-            "description": "Create a booking.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "client_name": {"type": "string"},
-                    "service_name": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
-                    "service_duration": {"type": "integer"},
-                    "date": {"type": "string"}
-                },
-                "required": ["client_name", "service_name", "start_time", "end_time", "service_duration", "date"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_services",
-            "description": "Get all available services in the salon.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stylists",
-            "description": "Get all stylists working at the salon.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stylist_services",
-            "description": "Get services offered by a specific stylist.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "stylist_id": {"type": "integer", "description": "The stylist's ID"}
-                },
-                "required": ["stylist_id"]
-            }
-        }
-    }
-]
-
-# -------------------------------
-# System Prompt
+# System Prompt (Simplified - now intent-driven)
 # -------------------------------
 
 SYSTEM_PROMPT = f"""
-You are an AI assistant for a nail salon.
+You are an AI assistant for a nail salon booking system.
 
-Your job is to:
-* help customers find available time slots
-* help customers book appointments
-* ask follow-up questions if information is missing
-* call tools when scheduling actions are required
+Your role is to:
+- Understand customer requests through natural conversation
+- Provide helpful, friendly responses
+- Guide customers through the booking process
+- Answer questions about services and stylists
 
-Never invent appointment times.
-Always call get_available_slots before suggesting times.
+The system will automatically handle:
+- Intent detection from your messages
+- Action planning and execution
+- Tool calling for data retrieval and booking
 
 Current date: {today}
 Current time: {current_time}
 
-Time Interpretation Rules:
-1. Always interpret natural language time expressions relative to today's date ({today}).
-2. Convert them into explicit calendar dates using the format: YYYY-MM-DD.
-3. Never assume past years. Always use the current year unless the user explicitly specifies another year.
-4. For time-of-day expressions, use these ranges:
-   - morning: 09:00 – 12:00
-   - afternoon: 12:00 – 17:00
-   - evening: 17:00 – 20:00
-5. If a user specifies a time range such as "tomorrow afternoon", filter available slots so they fall within that range.
-6. For relative dates:
-   - today: {today}
-   - tomorrow: the day after {today}
-   - next Monday: the next Monday after {today}
-   - next week: 7 days from {today}
+Be conversational and helpful. The technical aspects are handled by the system's intent layer.
 """
+
+# -------------------------------
+# Three-Layer Agent Architecture
+# -------------------------------
+
+class NailSalonAgent:
+    """AI agent using structured three-layer architecture."""
+
+    def __init__(self):
+        self.conversation_history = []
+        self.system_prompt = SYSTEM_PROMPT
+
+    def process_message(self, user_message: str) -> str:
+        """
+        Process a user message through the three-layer architecture.
+
+        Args:
+            user_message (str): The user's input message
+
+        Returns:
+            str: The agent's response
+        """
+        print(f"\n🔍 Analyzing intent for: '{user_message}'")
+
+        # Layer 1: Intent Detection
+        intent_data = analyze_intent(user_message)
+        print(f"📋 Detected intent: {intent_data}")
+
+        # Layer 2: Action Planning
+        action_plan = create_plan(intent_data)
+        print(f"📝 Generated action plan: {action_plan}")
+
+        # Layer 3: Tool Execution
+        execution_result = execute_actions(action_plan, intent_data)
+
+        # Generate natural language response using LLM
+        response = self._generate_response(user_message, intent_data, execution_result)
+
+        # Store in conversation history
+        self.conversation_history.append({
+            "user": user_message,
+            "intent": intent_data,
+            "actions": action_plan,
+            "results": execution_result,
+            "response": response
+        })
+
+        return response
+
+    def _generate_response(self, user_message: str, intent_data: Dict[str, Any], execution_result: Dict[str, Any]) -> str:
+        """
+        Generate a natural language response using the LLM.
+
+        Args:
+            user_message (str): Original user message
+            intent_data (Dict): Intent analysis results
+            execution_result (Dict): Tool execution results
+
+        Returns:
+            str: Natural language response
+        """
+        # Prepare context for LLM
+        context = f"""
+User message: {user_message}
+Detected intent: {intent_data.get('intent', 'unknown')}
+Confidence: {intent_data.get('confidence', 0):.2f}
+
+Execution results: {execution_result.get('results', {})}
+Errors: {execution_result.get('errors', [])}
+"""
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": f"Based on this context, provide a helpful response to the user:\n\n{context}"}
+        ]
+
+        try:
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=500
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            # Fallback response if LLM fails
+            return self._generate_fallback_response(intent_data, execution_result)
+
+    def _generate_fallback_response(self, intent_data: Dict[str, Any], execution_result: Dict[str, Any]) -> str:
+        """Generate a fallback response if LLM is unavailable."""
+        intent = intent_data.get('intent', 'unknown')
+        results = execution_result.get('results', {})
+
+        if intent == 'ask_services' and 'get_services' in results:
+            services = results['get_services']
+            # Deduplicate by service name while preserving order
+            seen = set()
+            unique_services = []
+            for s in services:
+                name = s['name']
+                if name not in seen:
+                    seen.add(name)
+                    unique_services.append(name)
+            return f"We offer the following services: {', '.join(unique_services)}."
+
+        elif intent == 'ask_stylists' and 'get_stylists' in results:
+            stylists = results['get_stylists']
+            stylist_names = [s['name'] for s in stylists]
+            return f"Our stylists are: {', '.join(stylist_names)}."
+
+        elif intent == 'book_service':
+            if execution_result.get('success'):
+                return "I've successfully booked your appointment! You'll receive a confirmation shortly."
+            else:
+                errors = execution_result.get('errors', [])
+                return f"I encountered some issues booking your appointment: {', '.join(errors)}. Please try again."
+
+        else:
+            return "I'm here to help with your nail salon booking needs. What would you like to know?"
+
 
 # -------------------------------
 # Conversation Loop
@@ -227,14 +184,14 @@ Time Interpretation Rules:
 
 def run_agent():
     """
-    Main conversation loop for the AI agent.
+    Main conversation loop for the AI agent using the three-layer architecture.
     """
     print("Welcome to the Nail Salon AI Assistant!")
+    print("This agent uses a structured three-layer architecture:")
+    print("🔍 Intent Layer → 📝 Planner → ⚡ Tool Executor")
     print("Type 'exit' to quit.\n")
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
-    ]
+    agent = NailSalonAgent()
 
     while True:
         user_input = input("User: ").strip()
@@ -242,70 +199,13 @@ def run_agent():
             print("Goodbye!")
             break
 
-        messages.append({"role": "user", "content": user_input})
+        try:
+            response = agent.process_message(user_input)
+            print(f"Assistant: {response}")
+        except Exception as e:
+            print(f"Error processing message: {str(e)}")
+            print("Assistant: I'm sorry, I encountered an error. Please try again.")
 
-        # Send to OpenAI with tool calling enabled
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto"
-        )
-
-        msg = response.choices[0].message
-
-        # If the LLM wants to call a tool
-        if msg.tool_calls:
-            tool_outputs = []
-            for tool_call in msg.tool_calls:
-                name = tool_call.function.name
-                args = tool_call.function.arguments
-
-                # Parse arguments
-                import json
-                tool_args = json.loads(args)
-
-                # Call the appropriate tool
-                if name == "get_available_slots":
-                    result = get_available_slots(**tool_args)
-                elif name == "book_appointment":
-                    result = book_appointment(**tool_args)
-                elif name == "get_services":
-                    result = get_services()
-                elif name == "get_stylists":
-                    result = get_stylists()
-                elif name == "get_stylist_services":
-                    result = get_stylist_services(**tool_args)
-                else:
-                    result = {"error": f"Unknown tool: {name}"}
-
-                tool_outputs.append({
-                    "tool_call_id": tool_call.id,
-                    "output": result
-                })
-
-            # Add tool outputs to messages and continue the conversation
-            messages.append(msg)
-            for tool_output in tool_outputs:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_output["tool_call_id"],
-                    "content": str(tool_output["output"])
-                })
-
-            # Get the final response from the LLM
-            final_response = openai.chat.completions.create(
-                model="gpt-4-1106-preview",
-                messages=messages
-            )
-            final_msg = final_response.choices[0].message
-            print(f"Assistant: {final_msg.content}")
-            messages.append({"role": "assistant", "content": final_msg.content})
-
-        else:
-            # No tool call, just respond
-            print(f"Assistant: {msg.content}")
-            messages.append({"role": "assistant", "content": msg.content})
 
 if __name__ == "__main__":
     run_agent()
