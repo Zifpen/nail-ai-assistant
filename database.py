@@ -13,26 +13,28 @@ from datetime import datetime
 from scheduler import get_available_slots
 
 
+
 # Database configuration
-DB_FILE = "salon.db"
+
+import os
+from logger import get_logger
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "salon.db")
+logger = get_logger("database")
 
 
 def get_db_connection() -> sqlite3.Connection:
     """
     Create and return a connection to the SQLite database.
-    
-    Returns:
-        sqlite3.Connection: Connection to the salon.db database
-        
-    Note:
-        Uses sqlite3.Row factory for dict-like row access.
     """
     try:
+        logger.info(f"Using SQLite DB: {os.path.abspath(DB_FILE)}")
+        logger.info(f"Current working directory: {os.getcwd()}")
         conn = sqlite3.connect(DB_FILE)
         conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:
-        print(f"Database connection error: {e}")
+        logger.error(f"Database connection error: {e}")
         raise
 
 
@@ -111,6 +113,16 @@ def init_database() -> None:
             )
         """)
         
+        # Conversations table for conversation memory
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                context_json TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Create index on start_time to improve performance for date-based queries
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_start_time
@@ -118,9 +130,9 @@ def init_database() -> None:
         """)
         
         conn.commit()
-        print(f"Database initialized successfully: {DB_FILE}")
+        logger.info(f"Database initialized successfully: {DB_FILE}")
     except sqlite3.Error as e:
-        print(f"Database initialization error: {e}")
+        logger.error(f"Database initialization error: {e}")
         raise
     finally:
         conn.close()
@@ -175,7 +187,7 @@ def get_appointments_for_day(date: str) -> List[Dict[str, str]]:
         return appointments
         
     except sqlite3.Error as e:
-        print(f"Database query error: {e}")
+        logger.error(f"Database query error: {e}")
         raise
     finally:
         conn.close()
@@ -223,7 +235,7 @@ def add_appointment(
         return appointment_id
         
     except sqlite3.Error as e:
-        print(f"Error adding appointment: {e}")
+        logger.error(f"Error adding appointment: {e}")
         raise
     finally:
         conn.close()
@@ -257,7 +269,7 @@ def get_appointment(appointment_id: int) -> Dict:
         return {}
         
     except sqlite3.Error as e:
-        print(f"Error retrieving appointment: {e}")
+        logger.error(f"Error retrieving appointment: {e}")
         raise
     finally:
         conn.close()
@@ -283,7 +295,7 @@ def delete_appointment(appointment_id: int) -> bool:
         return cursor.rowcount > 0
         
     except sqlite3.Error as e:
-        print(f"Error deleting appointment: {e}")
+        logger.error(f"Error deleting appointment: {e}")
         raise
     finally:
         conn.close()
@@ -310,7 +322,7 @@ def get_all_appointments() -> List[Dict]:
         return [dict(row) for row in rows]
         
     except sqlite3.Error as e:
-        print(f"Error retrieving appointments: {e}")
+        logger.error(f"Error retrieving appointments: {e}")
         raise
     finally:
         conn.close()
@@ -336,7 +348,7 @@ def clear_all_appointments() -> int:
         return cursor.rowcount
         
     except sqlite3.Error as e:
-        print(f"Error clearing appointments: {e}")
+        logger.error(f"Error clearing appointments: {e}")
         raise
     finally:
         conn.close()
@@ -372,7 +384,7 @@ def insert_user(name: str, phone: str, password_hash: str, role: str) -> int:
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error inserting user: {e}")
+        logger.error(f"Error inserting user: {e}")
         raise
     finally:
         conn.close()
@@ -403,7 +415,7 @@ def get_user_by_phone(phone: str) -> Dict:
         return dict(row) if row else {}
         
     except sqlite3.Error as e:
-        print(f"Error retrieving user: {e}")
+        logger.error(f"Error retrieving user: {e}")
         raise
     finally:
         conn.close()
@@ -420,12 +432,11 @@ def insert_service(name: str, category: str, description: str) -> int:
         
     Returns:
         int: Service ID of the newly inserted service
-        
+                    logger.info(f"Using SQLite DB: {os.path.abspath(DB_FILE)}")
     Raises:
         sqlite3.IntegrityError: If service name already exists
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
     
     try:
         created_at = datetime.now().isoformat()
@@ -438,7 +449,7 @@ def insert_service(name: str, category: str, description: str) -> int:
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error inserting service: {e}")
+        logger.error(f"Error inserting service: {e}")
         raise
     finally:
         conn.close()
@@ -471,7 +482,7 @@ def insert_stylist_service(stylist_id: int, service_id: int, duration: int, pric
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error inserting stylist service: {e}")
+        logger.error(f"Error inserting stylist service: {e}")
         raise
     finally:
         conn.close()
@@ -503,7 +514,7 @@ def insert_stylist(user_id: int, bio: str, experience_years: int) -> int:
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error inserting stylist: {e}")
+        logger.error(f"Error inserting stylist: {e}")
         raise
     finally:
         conn.close()
@@ -531,7 +542,7 @@ def create_stylist_profile(user_id: int) -> int:
         return cursor.lastrowid
 
     except sqlite3.Error as e:
-        print(f"Error creating stylist profile: {e}")
+        logger.error(f"Error creating stylist profile: {e}")
         raise
     finally:
         conn.close()
@@ -561,7 +572,7 @@ def get_service_by_name(name: str) -> Dict:
         return dict(row) if row else {}
         
     except sqlite3.Error as e:
-        print(f"Error retrieving service: {e}")
+        logger.error(f"Error retrieving service: {e}")
         raise
     finally:
         conn.close()
@@ -587,7 +598,7 @@ def get_all_services() -> List[Dict]:
         return [dict(row) for row in rows]
 
     except sqlite3.Error as e:
-        print(f"Error retrieving services: {e}")
+        logger.error(f"Error retrieving services: {e}")
         raise
     finally:
         conn.close()
@@ -614,7 +625,7 @@ def get_all_stylists() -> List[Dict]:
         return [dict(row) for row in rows]
 
     except sqlite3.Error as e:
-        print(f"Error retrieving stylists: {e}")
+        logger.error(f"Error retrieving stylists: {e}")
         raise
     finally:
         conn.close()
@@ -644,7 +655,7 @@ def get_services_for_stylist(stylist_id: int) -> List[Dict]:
         return [dict(row) for row in rows]
 
     except sqlite3.Error as e:
-        print(f"Error retrieving stylist services: {e}")
+        logger.error(f"Error retrieving stylist services: {e}")
         raise
     finally:
         conn.close()
@@ -675,7 +686,7 @@ def get_service_by_id(service_id: int) -> Dict:
         return dict(row) if row else {}
         
     except sqlite3.Error as e:
-        print(f"Error retrieving service: {e}")
+        logger.error(f"Error retrieving service: {e}")
         raise
     finally:
         conn.close()
@@ -710,7 +721,7 @@ def create_service(name: str, category: str = None, description: str = None) -> 
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error creating service: {e}")
+        logger.error(f"Error creating service: {e}")
         raise
     finally:
         conn.close()
@@ -743,7 +754,7 @@ def create_stylist_service(stylist_id: int, service_id: int, duration: int, pric
         return cursor.lastrowid
         
     except sqlite3.Error as e:
-        print(f"Error creating stylist service: {e}")
+        logger.error(f"Error creating stylist service: {e}")
         raise
     finally:
         conn.close()
@@ -855,7 +866,7 @@ def create_appointment_if_available(
     except Exception as e:
         # Handle any unexpected errors from database or scheduler
         error_message = f"Error processing appointment request: {str(e)}"
-        print(f"create_appointment_if_available failed: {e}")
+        logger.error(f"create_appointment_if_available failed: {e}")
         return {
             "success": False,
             "error": error_message
@@ -894,7 +905,7 @@ def get_stylist_service(stylist_id: int, service_id: int) -> Dict:
         return dict(row) if row else {}
         
     except sqlite3.Error as e:
-        print(f"Error retrieving stylist service: {e}")
+        logger.error(f"Error retrieving stylist service: {e}")
         raise
     finally:
         conn.close()

@@ -74,15 +74,51 @@ class IntentDetector:
             days_ahead += 7
         return self.today + timedelta(days=days_ahead)
 
-    def _extract_service(self, message: str) -> Optional[str]:
-        """Extract service name from message using fuzzy matching."""
-        message_lower = message.lower()
+    def _parse_loose_time(self, raw_time: str) -> Optional[str]:
+        """Parse times like 2pm, 2:30 pm, or 14:00 into HH:MM."""
+        cleaned = raw_time.strip().lower().replace(" ", "")
+        formats = ["%H:%M", "%I:%M%p", "%I%p"]
+        for fmt in formats:
+            try:
+                return datetime.strptime(cleaned, fmt).strftime("%H:%M")
+            except ValueError:
+                continue
+        return None
 
+    # --- Improved stylist and service detection ---
+    KNOWN_STYLISTS = ["anna", "mia", "test stylist 2"]
+    SERVICE_MAP = {
+        "hard gel": "hard gel",
+        "gel": "gel manicure",
+        "acrylic": "acrylic nails",
+        "manicure": "manicure",
+        "pedicure": "pedicure"
+    }
+
+    def _extract_stylist(self, message: str) -> Optional[str]:
+        """Extract stylist name from message by direct match."""
+        message_lower = message.lower()
+        for stylist in self.KNOWN_STYLISTS:
+            if stylist in message_lower:
+                return stylist.title()
+        stylist_match = re.search(r"with\s+([\w ]+)", message_lower)
+        if stylist_match:
+            candidate = stylist_match.group(1).strip()
+            for stylist in self.KNOWN_STYLISTS:
+                if stylist in candidate:
+                    return stylist.title()
+        return None
+
+    def _extract_service(self, message: str) -> Optional[str]:
+        """Extract service name from message using SERVICE_MAP."""
+        message_lower = message.lower()
+        for keyword, norm in self.SERVICE_MAP.items():
+            if keyword in message_lower:
+                return norm
         for pattern in self.service_patterns:
             match = re.search(pattern, message_lower)
             if match:
                 return match.group()
-
         return None
 
     def _extract_date(self, message: str) -> Optional[str]:
@@ -93,6 +129,19 @@ class IntentDetector:
         for date_name, date_obj in self.date_patterns.items():
             if date_name in message_lower:
                 return date_obj.strftime("%Y-%m-%d")
+
+        weekday_names = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+        for index, weekday_name in enumerate(weekday_names):
+            if re.search(rf"\b{weekday_name}\b", message_lower):
+                return self._get_next_weekday(index).strftime("%Y-%m-%d")
 
         # Check for explicit dates (YYYY-MM-DD format)
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", message)
@@ -115,13 +164,55 @@ class IntentDetector:
 
         return None
 
-    def _extract_stylist(self, message: str) -> Optional[str]:
-        """Extract stylist name from message."""
-        # Look for common stylist name patterns
-        stylist_match = re.search(r"with\s+(\w+)", message.lower())
-        if stylist_match:
-            return stylist_match.group(1).title()
+    def _extract_time(self, message: str) -> Optional[str]:
+        """Extract a time or time range from message."""
+        time_range_match = re.search(r"(\d{1,2}:\d{2}\s*[-to]+\s*\d{1,2}:\d{2})", message.lower())
+        if time_range_match:
+            return time_range_match.group(1).replace(" ", "")
 
+        time_match = re.search(r"\b(\d{1,2}:\d{2})\b", message)
+        if time_match:
+            return time_match.group(1)
+
+        return None
+
+    def _extract_time_preference(self, message: str) -> Optional[str]:
+        """Extract broad time-of-day preferences."""
+        message_lower = message.lower()
+        if "before noon" in message_lower:
+            return "morning"
+        if "morning" in message_lower:
+            return "morning"
+        if "afternoon" in message_lower:
+            return "afternoon"
+        if "evening" in message_lower:
+            return "evening"
+        return None
+
+    def _extract_time_after(self, message: str) -> Optional[str]:
+        """Extract constraints like 'after 2pm'."""
+        match = re.search(r"\bafter\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", message.lower())
+        if not match:
+            return None
+        return self._parse_loose_time(match.group(1))
+
+    def _extract_time_before(self, message: str) -> Optional[str]:
+        """Extract constraints like 'before 3:30pm'."""
+        match = re.search(r"\bbefore\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon)", message.lower())
+        if not match:
+            return None
+        raw_value = match.group(1)
+        if raw_value == "noon":
+            return "12:00"
+        return self._parse_loose_time(raw_value)
+
+    def _extract_time_direction(self, message: str) -> Optional[str]:
+        """Extract relative slot navigation requests like later or earlier."""
+        message_lower = message.lower()
+        if re.search(r"\b(later|later times|anything later|something later)\b", message_lower):
+            return "later"
+        if re.search(r"\b(earlier|sooner|anything earlier|something earlier)\b", message_lower):
+            return "earlier"
         return None
 
     def detect_intent(self, message: str) -> Dict[str, Any]:
@@ -140,47 +231,60 @@ class IntentDetector:
                 - confidence: float (0.0-1.0, confidence score)
         """
         message_lower = message.lower()
-
         # Default result
         result = {
             "intent": "unknown",
             "service": None,
             "date": None,
             "stylist": None,
+            "time": None,
+            "time_preference": None,
+            "time_after": None,
+            "time_before": None,
+            "time_direction": None,
             "confidence": 0.0
         }
-
-        # Check each intent pattern
+        # --- Extract service, stylist, date first ---
+        result["service"] = self._extract_service(message)
+        result["date"] = self._extract_date(message)
+        result["stylist"] = self._extract_stylist(message)
+        result["time"] = self._extract_time(message)
+        result["time_preference"] = self._extract_time_preference(message)
+        result["time_after"] = self._extract_time_after(message)
+        result["time_before"] = self._extract_time_before(message)
+        result["time_direction"] = self._extract_time_direction(message)
+        # --- Regex-based intent detection ---
         best_match = None
         best_score = 0.0
-
         for intent, patterns in self.intent_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, message_lower):
-                    # Calculate confidence based on pattern match
                     confidence = 0.8  # Base confidence for pattern match
-
-                    # Boost confidence for exact matches or multiple keywords
                     if intent == "book_service" and ("book" in message_lower or "appointment" in message_lower):
                         confidence = 0.95
                     elif intent == "ask_services" and "services" in message_lower:
                         confidence = 0.9
                     elif intent == "ask_stylists" and "stylist" in message_lower:
                         confidence = 0.9
-
                     if confidence > best_score:
                         best_score = confidence
                         best_match = intent
-
         if best_match:
             result["intent"] = best_match
             result["confidence"] = best_score
-
-            # Extract additional information based on intent
-            result["service"] = self._extract_service(message)
-            result["date"] = self._extract_date(message)
-            result["stylist"] = self._extract_stylist(message)
-
+        # --- Fallback: if service, stylist, or date is present, treat as booking intent ---
+        elif (
+            result["service"]
+            or result["stylist"]
+            or result["date"]
+            or result["time"]
+            or result["time_preference"]
+            or result["time_after"]
+            or result["time_before"]
+            or result["time_direction"]
+        ):
+            result["intent"] = "book_service"
+            result["confidence"] = 0.7
         return result
 
 

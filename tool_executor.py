@@ -41,19 +41,19 @@ class ToolExecutor:
         # Context storage for data flow between actions
         self.context = {}
 
-    def execute_plan(self, actions: List[str], intent_data: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_plan(self, actions: List[str], context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a sequence of actions based on the action plan.
 
         Args:
             actions (List[str]): Ordered list of actions to execute
-            intent_data (Dict[str, Any]): Original intent analysis data
+            context (Dict[str, Any]): Conversation context
 
         Returns:
             Dict[str, Any]: Execution results with final state and any errors
         """
         self.context = {
-            "intent_data": intent_data,
+            "context": context,
             "results": {},
             "errors": [],
             "current_action": None
@@ -91,18 +91,36 @@ class ToolExecutor:
         return self._format_final_result()
 
     def _resolve_service(self) -> Dict[str, Any]:
-        """Resolve a service name to canonical form."""
-        service_name = self.context["intent_data"].get("service")
-        if not service_name:
-            raise ValueError("No service name provided for resolution")
+        """
+        Resolves the service name from the conversation context, updates both the executor's internal context
+        and the shared conversation context with the resolved service information, and returns the resolved service object.
+        """
+        try:
+            service_name = self.context["context"].get("service")
+            if not service_name:
+                raise ValueError("No service name found in context.")
 
-        resolved = resolve_service_name(service_name)
-        if not resolved:
-            raise ValueError(f"Could not resolve service: {service_name}")
+            resolved = resolve_service_name(service_name)
+            if not resolved:
+                raise ValueError(f"Service '{service_name}' could not be resolved.")
 
-        # Store resolved service info in context
-        self.context["resolved_service"] = resolved
-        return resolved
+            # Store in executor's internal context
+            self.context["resolved_service"] = resolved
+
+            # Update shared conversation context with correct keys
+            self.context["context"]["service_id"] = resolved.get("service_id")
+            self.context["context"]["service_name"] = resolved.get("service_name")
+            self.context["context"]["service_resolved"] = True
+
+            return resolved
+
+        except Exception as e:
+            # Preserve existing error handling
+            self.context["context"]["service_resolved"] = False
+            self.context["resolved_service"] = None
+            self.context["context"]["service_id"] = None
+            self.context["context"]["service_name"] = None
+            raise e
 
     def _get_services(self) -> List[Dict[str, Any]]:
         """Get all available services."""
@@ -121,59 +139,63 @@ class ToolExecutor:
             # Try API first
             resp = requests.get(f"{self.api_base}/stylists")
             resp.raise_for_status()
-            return resp.json()
+            stylists = resp.json()
         except:
             # Fallback to direct database access
-            return get_all_stylists()
+            stylists = get_all_stylists()
+
+        self.context["context"]["stylists_retrieved"] = True
+        self.context["context"]["available_stylists"] = stylists
+
+        return stylists
 
     def _get_stylist_services(self) -> List[Dict[str, Any]]:
         """Get services offered by a specific stylist."""
-        # Try to get stylist_id from context or intent data
-        stylist_id = None
 
-        # Check if we have a resolved stylist
-        stylist_name = self.context["intent_data"].get("stylist")
-        if stylist_name:
-            # Find stylist by name
-            stylists = self.context["results"].get("get_stylists", [])
-            for stylist in stylists:
-                if stylist["name"].lower() == stylist_name.lower():
-                    stylist_id = stylist["id"]
-                    break
+        # ⭐ FIRST: use stylist_id from context
+        stylist_id = self.context["context"].get("stylist_id")
 
+        # SECOND: try matching by stylist name
         if not stylist_id:
-            # Use first available stylist as default
-            stylists = self.context["results"].get("get_stylists", [])
-            if stylists:
-                stylist_id = stylists[0]["id"]
+            stylist_name = self.context["context"].get("stylist")
+
+            if stylist_name:
+                stylists = self.context["results"].get("get_stylists", [])
+
+                for stylist in stylists:
+                    if stylist_name.lower() in stylist["name"].lower():
+                        stylist_id = stylist["id"]
+                        break
 
         if not stylist_id:
             raise ValueError("No stylist ID available for service lookup")
 
         try:
-            # Try API first
             resp = requests.get(f"{self.api_base}/stylists/{stylist_id}/services")
             resp.raise_for_status()
-            return resp.json()
+
+            services = resp.json()
+
+            # ⭐ update context
+            self.context["context"]["stylist_services_retrieved"] = True
+
+            return services
+
         except:
-            # Fallback to direct database access
             return get_services_for_stylist(stylist_id)
 
     def _get_available_slots(self) -> Dict[str, Any]:
         """Find available time slots for booking."""
-        # Get required parameters
-        date = self.context["intent_data"].get("date")
+        context = self.context["context"]
+        date = context.get("date")
         if not date:
-            # Default to tomorrow if no date specified
-            tomorrow = datetime.now().date() + timedelta(days=1)
-            date = tomorrow.strftime("%Y-%m-%d")
+            raise ValueError("No date available for slot lookup")
 
-        # Get stylist_id and service_id
-        stylist_id = None
-        service_id = None
+        # Prefer persisted conversation context before falling back to this turn's tool results.
+        stylist_id = context.get("stylist_id")
+        service_id = context.get("service_id")
+        stylist_name = context.get("stylist")
 
-        # Try to get stylist_id from intent or context
-        stylist_name = self.context["intent_data"].get("stylist")
         if stylist_name:
             stylists = self.context["results"].get("get_stylists", [])
             for stylist in stylists:
@@ -181,93 +203,74 @@ class ToolExecutor:
                     stylist_id = stylist["id"]
                     break
 
-        # Try to get service_id from resolved service
         resolved_service = self.context.get("resolved_service")
         if resolved_service:
             service_id = resolved_service.get("service_id")
 
-        # If we don't have service_id, try to find it from service name
         if not service_id:
-            service_name = self.context["intent_data"].get("service")
+            service_name = context.get("service")
             if service_name:
                 services = self.context["results"].get("get_services", [])
                 for service in services:
                     if service["name"].lower() == service_name.lower():
                         service_id = service["id"]
                         break
-
-        # If still no service_id, use the first available service
         if not service_id:
             services = self.context["results"].get("get_services", [])
             if services:
                 service_id = services[0]["id"]
-
-        # If still no stylist_id, use the first available stylist
-        if not stylist_id:
-            stylists = self.context["results"].get("get_stylists", [])
-            if stylists:
-                stylist_id = stylists[0]["id"]
-
         if not service_id or not stylist_id:
             raise ValueError("Missing required parameters: service_id or stylist_id")
 
-        # Call the API
+        context["stylist_id"] = stylist_id
+        context["service_id"] = service_id
+
         params = {
             "date": date,
             "stylist_id": stylist_id,
             "service_id": service_id
         }
-
         resp = requests.get(f"{self.api_base}/available-slots", params=params)
         resp.raise_for_status()
-        return resp.json()
+        slots_response = resp.json()
+        context["available_slots_retrieved"] = True
+        context["available_slots"] = slots_response
+        context["all_available_slots"] = slots_response
+        context["slot_display_offset"] = 0
+        return slots_response
 
     def _book_appointment(self) -> Dict[str, Any]:
         """Create a new appointment booking."""
-        # Get all necessary information from context
-        intent_data = self.context["intent_data"]
+        context = self.context["context"]
         resolved_service = self.context.get("resolved_service", {})
-        available_slots = self.context["results"].get("get_available_slots", {})
+        available_slots = self.context["results"].get("get_available_slots") or context.get("available_slots", {})
         stylists = self.context["results"].get("get_stylists", [])
-
-        # Extract booking parameters
-        client_name = "AI Assistant Test User"  # Would come from user input in real scenario
-
-        # Get service_id from resolved service
-        service_id = resolved_service.get("service_id")
+        client_name = "AI Assistant Test User"
+        service_id = context.get("service_id") or resolved_service.get("service_id")
         if not service_id:
             raise ValueError("No service_id available for booking")
-
-        # Get stylist_id - prefer specified stylist, otherwise use first available
-        stylist_id = None
-        stylist_name = intent_data.get("stylist")
+        stylist_id = context.get("stylist_id")
+        stylist_name = context.get("stylist")
         if stylist_name:
             for stylist in stylists:
                 if stylist["name"].lower() == stylist_name.lower():
                     stylist_id = stylist["id"]
                     break
-
-        if not stylist_id and stylists:
-            stylist_id = stylists[0]["id"]
-
         if not stylist_id:
             raise ValueError("No stylist_id available for booking")
-
-        # Get date
-        date = intent_data.get("date") or available_slots.get("date")
+        date = context.get("date") or available_slots.get("date")
         if not date:
-            from datetime import datetime
             date = (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        start_time = context.get("start_time")
+        end_time = context.get("end_time")
 
-        # Get first available slot
-        slots = available_slots.get("slots", [])
-        if not slots:
-            raise ValueError("No available slots for booking")
+        if not start_time or not end_time:
+            slots = available_slots.get("slots", [])
+            if not slots:
+                raise ValueError("No available slots for booking")
+            start_time = slots[0]["start"]
+            end_time = slots[0]["end"]
 
-        start_time = slots[0]["start"]
-        end_time = slots[0]["end"]
-
-        # Prepare booking payload
         payload = {
             "client_name": client_name,
             "stylist_id": stylist_id,
@@ -276,10 +279,7 @@ class ToolExecutor:
             "end_time": end_time,
             "date": date
         }
-
-        print(f"Booking payload: {payload}")  # Debug
-
-        # Make the booking
+        print(f"Booking payload: {payload}")
         resp = requests.post(f"{self.api_base}/book", json=payload)
         resp.raise_for_status()
         return resp.json()
@@ -294,19 +294,19 @@ class ToolExecutor:
         }
 
 
-def execute_actions(actions: List[str], intent_data: Dict[str, Any]) -> Dict[str, Any]:
+def execute_actions(actions: List[str], context: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convenience function to execute an action plan.
 
     Args:
         actions (List[str]): List of actions to execute
-        intent_data (Dict[str, Any]): Intent analysis data
+        context (Dict[str, Any]): Conversation context
 
     Returns:
         Dict[str, Any]: Execution results
     """
     executor = ToolExecutor()
-    return executor.execute_plan(actions, intent_data)
+    return executor.execute_plan(actions, context)
 
 
 # Example usage

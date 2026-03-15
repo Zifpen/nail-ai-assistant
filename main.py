@@ -232,6 +232,14 @@ def get_available_slots_endpoint(
             date=date
         )
         
+        requested_date = datetime.strptime(date, "%Y-%m-%d").date()
+        now = datetime.now()
+        if requested_date == now.date():
+            available_slots = [
+                slot for slot in available_slots
+                if datetime.strptime(slot["start"], "%Y-%m-%d %H:%M") > now
+            ]
+
         # STEP 4: Return formatted response
         return AvailableSlotsResponse(
             date=date,
@@ -303,12 +311,18 @@ def book_appointment(request: BookAppointmentRequest):
         
         # Validate start_time and end_time format
         try:
-            datetime.strptime(request.start_time, "%Y-%m-%d %H:%M")
-            datetime.strptime(request.end_time, "%Y-%m-%d %H:%M")
+            start_dt = datetime.strptime(request.start_time, "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(request.end_time, "%Y-%m-%d %H:%M")
         except ValueError:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid time format. Use YYYY-MM-DD HH:MM (e.g., 2026-03-12 10:00)"
+            )
+
+        if start_dt <= datetime.now():
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot book an appointment in the past"
             )
         
         # Validate required fields
