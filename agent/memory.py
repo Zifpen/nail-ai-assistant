@@ -102,6 +102,9 @@ def default_context() -> Dict[str, Any]:
     return {
         "intent": None,
         "service": None,
+        "client_id": None,
+        "client_name": None,
+        "client_phone": None,
         "stylist": None,
         "stylist_id": None,
         "stylists_retrieved": False,
@@ -116,4 +119,8 @@ def default_context() -> Dict[str, Any]:
         "available_slots": None,
         "all_available_slots": None,
         "slot_display_offset": 0,
+        "start_time": None,
+        "end_time": None,
+        "selected_slot": None,
+        "requested_time_unavailable": None,
     }

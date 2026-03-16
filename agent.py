@@ -18,10 +18,31 @@ import openai
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Dict, Any
+from agent.responses import (
+    build_booking_confirmation,
+    build_booking_error_response,
+    build_services_response,
+    build_stylists_response,
+)
+from agent.time_negotiation import (
+    apply_time_bounds,
+    apply_time_preference,
+    build_display_slots,
+    handle_slot_navigation,
+    reset_time_selection,
+    resolve_selected_slot,
+)
 from intent_layer import analyze_intent
 from planner import create_plan
 from tool_executor import execute_actions
-from database import get_services_for_stylist
+from database import (
+    get_client_by_phone,
+    get_client_history,
+    get_services_for_stylist,
+    get_stylist_by_id,
+    normalize_phone,
+    upsert_client,
+)
 # --- Conversation Memory Integration ---
 from agent.memory import load_context, update_context, reset_context, default_context
 from logger import get_logger
@@ -74,26 +95,10 @@ Be conversational and helpful. The technical aspects are handled by the system's
 class NailSalonAgent:
     """AI agent using structured three-layer architecture."""
 
-    def __init__(self):
+    def __init__(self, client_profile: Dict[str, Any] | None = None):
         self.conversation_history = []
         self.system_prompt = SYSTEM_PROMPT
-
-    def _normalize_time_text(self, value: str) -> str:
-        """Normalize time text so 9:15 and 09:15 compare the same."""
-        value = value.lower().replace(" ", "").replace("to", "-")
-        if "-" in value:
-            parts = value.split("-", 1)
-            return f"{self._normalize_time_text(parts[0])}-{self._normalize_time_text(parts[1])}"
-
-        try:
-            parsed = datetime.strptime(value, "%H:%M")
-        except ValueError:
-            try:
-                parsed = datetime.strptime(value, "%I:%M")
-            except ValueError:
-                return value
-
-        return parsed.strftime("%H:%M")
+        self.client_profile = client_profile or {}
 
     def _user_wants_stylist_recommendation(self, user_message: str) -> bool:
         """Detect when the user wants a stylist recommendation."""
@@ -172,133 +177,6 @@ class NailSalonAgent:
 
         return "Here are my suggestions: " + "; ".join(suggestion_parts) + ". Which stylist would you like?"
 
-    def _slot_matches_preference(self, slot: Dict[str, Any], preference: str) -> bool:
-        """Check whether a slot falls into the requested time-of-day bucket."""
-        start_full = slot.get("start")
-        if not start_full:
-            return False
-
-        start_time = datetime.strptime(start_full.split()[-1], "%H:%M").time()
-        hour = start_time.hour
-
-        if preference == "morning":
-            return hour < 12
-        if preference == "afternoon":
-            return 12 <= hour < 17
-        if preference == "evening":
-            return hour >= 17
-        return True
-
-    def _slot_matches_bounds(self, slot: Dict[str, Any], time_after: str, time_before: str) -> bool:
-        """Check whether a slot respects after/before constraints."""
-        start_full = slot.get("start")
-        if not start_full:
-            return False
-
-        start_value = start_full.split()[-1]
-        start_time = datetime.strptime(start_value, "%H:%M")
-
-        if time_after:
-            after_time = datetime.strptime(time_after, "%H:%M")
-            if start_time < after_time:
-                return False
-
-        if time_before:
-            before_time = datetime.strptime(time_before, "%H:%M")
-            if start_time >= before_time:
-                return False
-
-        return True
-
-    def _apply_time_preference(self, context: Dict[str, Any]) -> None:
-        """Filter available slots by morning/afternoon/evening preference."""
-        preference = context.get("time_preference")
-        all_slots_data = context.get("all_available_slots") or context.get("available_slots") or {}
-        slots = all_slots_data.get("slots", [])
-        if not preference or not slots:
-            return
-
-        filtered_slots = [slot for slot in slots if self._slot_matches_preference(slot, preference)]
-        context["available_slots"] = {
-            **all_slots_data,
-            "slots": filtered_slots,
-            "total_slots": len(filtered_slots),
-        }
-
-    def _apply_time_bounds(self, context: Dict[str, Any]) -> None:
-        """Filter available slots by after/before time constraints."""
-        time_after = context.get("time_after")
-        time_before = context.get("time_before")
-        all_slots_data = context.get("all_available_slots") or context.get("available_slots") or {}
-        slots = all_slots_data.get("slots", [])
-        if not slots or (not time_after and not time_before):
-            return
-
-        filtered_slots = [
-            slot for slot in slots if self._slot_matches_bounds(slot, time_after, time_before)
-        ]
-        context["available_slots"] = {
-            **all_slots_data,
-            "slots": filtered_slots,
-            "total_slots": len(filtered_slots),
-        }
-
-    def _build_display_slots(self, slots: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-        """Build a friendlier list of representative, non-overlapping slot suggestions."""
-        display_slots = []
-        last_end = None
-
-        for slot in slots:
-            start = slot.get("start")
-            end = slot.get("end")
-            if not start or not end:
-                continue
-
-            start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(end, "%Y-%m-%d %H:%M")
-
-            if last_end is None or start_dt >= last_end:
-                display_slots.append(slot)
-                last_end = end_dt
-
-        return display_slots if display_slots else slots
-
-    def _reset_time_selection(self, context: Dict[str, Any], reset_date: bool = False) -> None:
-        """Clear the currently selected time and optionally the selected date."""
-        context["time"] = None
-        context["start_time"] = None
-        context["end_time"] = None
-        context["selected_slot"] = None
-        if reset_date:
-            context["date"] = None
-        context["available_slots_retrieved"] = False if reset_date else context.get("available_slots_retrieved", False)
-        context["available_slots"] = None if reset_date else context.get("available_slots")
-        context["all_available_slots"] = None if reset_date else context.get("all_available_slots")
-        context["slot_display_offset"] = 0
-
-    def _handle_slot_navigation(self, context: Dict[str, Any]) -> bool:
-        """Move the visible slot window forward or backward."""
-        direction = context.get("time_direction")
-        slots_data = context.get("available_slots") or {}
-        slots = self._build_display_slots(slots_data.get("slots", []))
-        if not direction or not slots:
-            return False
-
-        offset = context.get("slot_display_offset", 0)
-        page_size = 5
-        if direction == "later":
-            if offset + page_size < len(slots):
-                context["slot_display_offset"] = offset + page_size
-            else:
-                context["slot_display_offset"] = offset
-        elif direction == "earlier":
-            context["slot_display_offset"] = max(0, offset - page_size)
-        else:
-            return False
-
-        context["time_direction"] = None
-        return True
-
     def _handle_time_rejection(self, context: Dict[str, Any], user_message: str) -> bool:
         """Reset slot selection state when the user rejects the current set of times."""
         message_lower = user_message.lower()
@@ -337,43 +215,82 @@ class NailSalonAgent:
         if not any(phrase in message_lower for phrase in rejection_phrases):
             return False
 
-        self._reset_time_selection(context, reset_date=True)
+        reset_time_selection(context, reset_date=True)
         context["time_preference"] = None
         context["time_after"] = None
         context["time_before"] = None
         context["time_direction"] = None
         return True
 
-    def _resolve_selected_slot(self, context: Dict[str, Any], raw_time: str) -> None:
-        """Map a user-provided time or time range to one of the fetched available slots."""
-        slots_data = context.get("available_slots", {}) or {}
-        slots = slots_data.get("slots", [])
-        if not raw_time or not slots:
-            return
+    def _is_last_appointment_question(self, user_message: str) -> bool:
+        """Detect questions about the client's previous appointment or stylist."""
+        message_lower = user_message.lower()
+        patterns = [
+            "last appointment",
+            "previous appointment",
+            "last stylist",
+            "previous stylist",
+            "who did my nails last time",
+            "who was my stylist last time",
+            "who was my last stylist",
+            "which stylist did i book last time",
+            "which stylist i book last time",
+            "what stylist did i book last time",
+            "what stylist i book last time",
+            "who did i book last time",
+            "who did i book with last time",
+            "who did i see last time",
+            "上次预约",
+            "上次是谁",
+            "上次哪个stylist",
+            "上次哪个美甲师",
+        ]
+        if any(pattern in message_lower for pattern in patterns):
+            return True
 
-        normalized = self._normalize_time_text(raw_time)
-        selected_slot = None
+        has_last_time = "last time" in message_lower or "previous" in message_lower
+        asks_about_stylist = "stylist" in message_lower or "book with" in message_lower
+        asks_about_who = "who" in message_lower and "book" in message_lower
+        return has_last_time and (asks_about_stylist or asks_about_who)
 
-        for slot in slots:
-            start_full = slot.get("start")
-            end_full = slot.get("end")
-            if not start_full or not end_full:
+    def _build_last_appointment_response(self, context: Dict[str, Any]) -> str:
+        """Answer questions about the client's most recent completed or past appointment."""
+        client_id = context.get("client_id")
+        if not client_id:
+            return "I can help with that once I know which client profile to use. Could you share your phone number first?"
+
+        history = get_client_history(client_id)
+        now = datetime.now()
+        past_appointments = []
+        for appointment in history:
+            start_time = appointment.get("start_time")
+            if not start_time:
                 continue
+            try:
+                start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            if start_dt <= now:
+                appointment["_start_dt"] = start_dt
+                past_appointments.append(appointment)
 
-            start_time = self._normalize_time_text(start_full.split()[-1])
-            end_time = self._normalize_time_text(end_full.split()[-1])
-            range_text = f"{start_time}-{end_time}"
+        if not past_appointments:
+            return "I don't see any past appointments on your profile yet."
 
-            if normalized == range_text or normalized == start_time:
-                selected_slot = slot
-                break
+        last_appointment = max(past_appointments, key=lambda item: item["_start_dt"])
+        stylist_name = None
+        stylist_id = last_appointment.get("stylist_id")
+        if stylist_id:
+            stylist = get_stylist_by_id(stylist_id)
+            if stylist.get("name"):
+                stylist_name = stylist["name"]
 
-        if selected_slot:
-            context["time"] = selected_slot["start"].split()[-1]
-            context["start_time"] = selected_slot["start"]
-            context["end_time"] = selected_slot["end"]
-            context["selected_slot"] = selected_slot
-            context["available_slots_retrieved"] = True
+        service_name = last_appointment.get("service_name_snapshot") or "your service"
+        date_text = last_appointment["_start_dt"].strftime("%Y-%m-%d")
+        time_text = last_appointment["_start_dt"].strftime("%H:%M")
+        if stylist_name:
+            return f"Your last appointment was {service_name} with {stylist_name} on {date_text} at {time_text}."
+        return f"I can see your last appointment was {service_name} on {date_text} at {time_text}, but that older booking does not have a stylist saved."
 
     def process_message(self, user_message: str, user_id: int = 1) -> str:
         """
@@ -397,6 +314,13 @@ class NailSalonAgent:
             logger.info("No context found, creating new default context")
             context = default_context()
 
+        for key in ["client_id", "client_name", "client_phone"]:
+            if self.client_profile.get(key) not in [None, "", []]:
+                context[key] = self.client_profile[key]
+
+        if self._is_last_appointment_question(user_message):
+            return self._build_last_appointment_response(context)
+
         # --- Intent Detection with Conversation Context ---
         combined_message = user_message
         if self.conversation_history:
@@ -411,7 +335,7 @@ class NailSalonAgent:
 
         # --- Update context with extracted info (safe merge: do not overwrite with None, empty, or []) ---
         previous_date = context.get("date")
-        for key in ["service", "stylist", "date", "time", "time_preference", "time_after", "time_before", "time_direction", "stylist_id", "intent"]:
+        for key in ["service", "stylist", "date", "time_preference", "time_after", "time_before", "time_direction", "stylist_id", "intent"]:
             new_value = intent_data.get(key)
             if new_value not in [None, "", []]:
                 context[key] = new_value
@@ -421,7 +345,7 @@ class NailSalonAgent:
             return "No problem. What other day would work better for you?"
 
         if context.get("date") and context.get("date") != previous_date:
-            self._reset_time_selection(context, reset_date=False)
+            reset_time_selection(context, reset_date=False)
             context["available_slots_retrieved"] = False
             context["available_slots"] = None
             context["all_available_slots"] = None
@@ -436,14 +360,14 @@ class NailSalonAgent:
                     break
 
         if intent_data.get("time"):
-            self._resolve_selected_slot(context, intent_data["time"])
+            resolve_selected_slot(context, intent_data["time"])
 
         if context.get("available_slots_retrieved") and not context.get("time"):
             if context.get("time_preference"):
-                self._apply_time_preference(context)
+                apply_time_preference(context)
             if context.get("time_after") or context.get("time_before"):
-                self._apply_time_bounds(context)
-            self._handle_slot_navigation(context)
+                apply_time_bounds(context)
+            handle_slot_navigation(context)
 
         if context.get("time") and context.get("time_direction"):
             context["time_direction"] = None
@@ -490,6 +414,7 @@ class NailSalonAgent:
                 update_context(user_id, context)
                 slots_data = context.get("available_slots", {})
                 slots = slots_data.get("slots", [])
+                requested_time_unavailable = context.get("requested_time_unavailable")
                 if not slots:
                     preference = context.get("time_preference")
                     if preference:
@@ -503,7 +428,7 @@ class NailSalonAgent:
                         return f"I couldn't find any openings {' and '.join(parts)} on {context.get('date', 'that day')}. Would you like a different time or another date?"
                     return "I found your service details, but I couldn't find any open times yet. Could you share another date or time preference?"
 
-                display_slots = self._build_display_slots(slots)
+                display_slots = build_display_slots(slots)
                 offset = context.get("slot_display_offset", 0)
                 visible_slots = display_slots[offset:offset + 5]
                 if not visible_slots and offset:
@@ -525,8 +450,12 @@ class NailSalonAgent:
                     guidance = " You can also say 'later' to see more times."
                 elif offset > 0:
                     guidance = " You can also say 'earlier' to go back."
+                unavailable_notice = ""
+                if requested_time_unavailable:
+                    unavailable_notice = f"I don't have {requested_time_unavailable} available on {date}. "
+                    context["requested_time_unavailable"] = None
                 increment_hint = " We book in 15-minute increments, so you can also ask for a time like 14:15 or 14:30."
-                return f"I found openings for {date}: {slot_text}. Which time works best for you?{guidance}{increment_hint}"
+                return f"{unavailable_notice}I found openings for {date}: {slot_text}. Which time works best for you?{guidance}{increment_hint}"
 
             if not action_plan:
                 break
@@ -576,37 +505,6 @@ class NailSalonAgent:
 
         return response
 
-    def _generate_booking_confirmation(self, context: Dict[str, Any], execution_result: Dict[str, Any]) -> str:
-        """Build a stable confirmation message for successful bookings."""
-        service_name = context.get("service_name") or context.get("service") or "your service"
-        stylist_name = context.get("stylist") or "your stylist"
-        date = context.get("date")
-        start_time = context.get("start_time")
-
-        if start_time and " " in start_time:
-            _, start_clock = start_time.split(" ", 1)
-        else:
-            start_clock = context.get("time")
-
-        booking_result = execution_result.get("results", {}).get("book_appointment", {})
-        appointment_id = booking_result.get("appointment_id")
-
-        details = []
-        if service_name:
-            details.append(service_name)
-        if date:
-            details.append(f"on {date}")
-        if start_clock:
-            details.append(f"at {start_clock}")
-        if stylist_name:
-            details.append(f"with {stylist_name}")
-
-        detail_text = " ".join(details).strip()
-        confirmation = f"Your appointment is confirmed for {detail_text}.".replace("for on", "for")
-        if appointment_id:
-            confirmation += f" Your confirmation number is {appointment_id}."
-        return confirmation
-
     def _generate_response(self, user_message: str, intent_data: Dict[str, Any], execution_result: Dict[str, Any], context_data: Dict[str, Any]) -> str:
         """
         Generate a natural language response using the LLM.
@@ -625,7 +523,7 @@ class NailSalonAgent:
             and execution_result.get("success")
             and execution_result.get("results", {}).get("book_appointment")
         ):
-            return self._generate_booking_confirmation(context_data, execution_result)
+            return build_booking_confirmation(context_data, execution_result)
 
         # Prepare context for LLM
         context = f"""
@@ -659,28 +557,16 @@ Errors: {execution_result.get('errors', [])}
         results = execution_result.get('results', {})
 
         if intent == 'ask_services' and 'get_services' in results:
-            services = results['get_services']
-            # Deduplicate by service name while preserving order
-            seen = set()
-            unique_services = []
-            for s in services:
-                name = s['name']
-                if name not in seen:
-                    seen.add(name)
-                    unique_services.append(name)
-            return f"We offer the following services: {', '.join(unique_services)}."
+            return build_services_response(results)
 
         elif intent == 'ask_stylists' and 'get_stylists' in results:
-            stylists = results['get_stylists']
-            stylist_names = [s['name'] for s in stylists]
-            return f"Our stylists are: {', '.join(stylist_names)}."
+            return build_stylists_response(results)
 
         elif intent == 'book_service':
             if execution_result.get('success'):
-                return self._generate_booking_confirmation(context_data or {}, execution_result)
+                return build_booking_confirmation(context_data or {}, execution_result)
             else:
-                errors = execution_result.get('errors', [])
-                return f"I encountered some issues booking your appointment: {', '.join(errors)}. Please try again."
+                return build_booking_error_response(execution_result)
 
         else:
             return "I'm here to help with your nail salon booking needs. What would you like to know?"
@@ -699,10 +585,60 @@ def run_agent():
     print("🔍 Intent Layer → 📝 Planner → ⚡ Tool Executor")
     print("Type 'exit' to quit.\n")
 
-    agent = NailSalonAgent()
-    user_id = 1  # For demo/testing, use a fixed user_id. Replace with real user ID in production.
+    print("Assistant: Welcome! Before we book, may I have your phone number? For example: 555-123-4567.")
+    while True:
+        raw_phone = input("User: ").strip()
+        if raw_phone.lower() in {"exit", "quit"}:
+            print("Goodbye!")
+            return
+        try:
+            phone = normalize_phone(raw_phone)
+            break
+        except ValueError:
+            print("Assistant: Please enter a 10-digit phone number. For example: 555-123-4567.")
 
-    # Reset context at the start of a new session so tests don't inherit stale booking state.
+    existing_client = get_client_by_phone(phone)
+    if existing_client:
+        client_profile = {
+            "client_id": existing_client["id"],
+            "client_name": existing_client["name"],
+            "client_phone": phone,
+        }
+        print(f"Assistant: Nice to see you again, {existing_client['name']}. How can I help with your booking today?")
+    else:
+        print("Assistant: I don't see a profile with that number yet. I'd be happy to get you set up as a new client before we book your appointment.")
+
+        print("Assistant: What name would you like me to use for your profile?")
+        client_name = input("User: ").strip()
+        while not client_name:
+            client_name = input("User: ").strip()
+
+        print("Assistant: What email would you like me to save for appointment confirmations? If you'd prefer to skip it, just type 'skip'.")
+        client_email = input("User: ").strip()
+        if client_email.lower() == "skip":
+            client_email = None
+
+        print("Assistant: Would you like to receive occasional salon updates or promotions by text or email? (yes/no)")
+        marketing_answer = input("User: ").strip().lower()
+        marketing_opt_in = marketing_answer in {"yes", "y"}
+
+        client_id = upsert_client(
+            name=client_name,
+            phone=phone,
+            email=client_email,
+            marketing_opt_in=marketing_opt_in,
+        )
+        client_profile = {
+            "client_id": client_id,
+            "client_name": client_name,
+            "client_phone": phone,
+        }
+        print(f"Assistant: Thank you, {client_name}. You're all set, and we can go ahead with your booking now. What would you like to book today?")
+
+    agent = NailSalonAgent(client_profile=client_profile)
+    user_id = client_profile["client_id"]
+
+    # Reset context at the start of a new session for this specific client.
     reset_context(user_id)
 
     while True:

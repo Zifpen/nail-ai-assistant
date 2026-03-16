@@ -6,6 +6,7 @@ expected by the scheduler module.
 """
 
 import sqlite3
+import re
 from typing import List, Dict
 from datetime import datetime
 
@@ -21,6 +22,157 @@ from logger import get_logger
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "salon.db")
 logger = get_logger("database")
+
+
+def normalize_phone(phone: str) -> str:
+    """Normalize a phone number into a stable 10-digit US format."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        raise ValueError("Phone number must contain 10 digits")
+    return digits
+
+
+def _column_exists(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+    """Check whether a column exists on a table."""
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return any(row[1] == column_name for row in cursor.fetchall())
+
+
+def _migrate_appointments_schema(cursor: sqlite3.Cursor) -> None:
+    """Add newer appointment columns without destroying existing data."""
+    columns_to_add = [
+        ("client_id", "INTEGER"),
+        ("client_user_id", "INTEGER"),
+        ("stylist_id", "INTEGER"),
+        ("service_id", "INTEGER"),
+        ("client_name_snapshot", "TEXT"),
+        ("service_name_snapshot", "TEXT"),
+        ("status", "TEXT NOT NULL DEFAULT 'booked'"),
+        ("notes", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]
+
+    for column_name, column_type in columns_to_add:
+        if not _column_exists(cursor, "appointments", column_name):
+            cursor.execute(f"ALTER TABLE appointments ADD COLUMN {column_name} {column_type}")
+
+    cursor.execute("""
+        UPDATE appointments
+        SET client_name_snapshot = COALESCE(client_name_snapshot, client_name)
+        WHERE client_name_snapshot IS NULL
+    """)
+    cursor.execute("""
+        UPDATE appointments
+        SET service_name_snapshot = COALESCE(service_name_snapshot, service_name)
+        WHERE service_name_snapshot IS NULL
+    """)
+    cursor.execute("""
+        UPDATE appointments
+        SET status = COALESCE(status, 'booked')
+        WHERE status IS NULL OR status = ''
+    """)
+    cursor.execute("""
+        UPDATE appointments
+        SET created_at = COALESCE(created_at, start_time),
+            updated_at = COALESCE(updated_at, start_time)
+        WHERE created_at IS NULL OR updated_at IS NULL
+    """)
+    cursor.execute("""
+        UPDATE appointments
+        SET service_id = (
+            SELECT s.id
+            FROM services s
+            WHERE LOWER(s.name) = LOWER(appointments.service_name)
+            LIMIT 1
+        )
+        WHERE service_id IS NULL AND service_name IS NOT NULL
+    """)
+
+
+def _migrate_clients_schema(cursor: sqlite3.Cursor) -> None:
+    """Backfill client links from existing appointment rows."""
+    if not _column_exists(cursor, "appointments", "client_id"):
+        return
+
+    cursor.execute("""
+        INSERT INTO clients (name, created_at, updated_at, marketing_opt_in)
+        SELECT
+            src.client_name,
+            MIN(src.created_value),
+            MIN(src.updated_value),
+            0
+        FROM (
+            SELECT
+                COALESCE(client_name_snapshot, client_name) AS client_name,
+                COALESCE(created_at, start_time, CURRENT_TIMESTAMP) AS created_value,
+                COALESCE(updated_at, start_time, CURRENT_TIMESTAMP) AS updated_value
+            FROM appointments
+            WHERE COALESCE(client_name_snapshot, client_name) IS NOT NULL
+              AND TRIM(COALESCE(client_name_snapshot, client_name)) != ''
+        ) src
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM clients c
+            WHERE LOWER(c.name) = LOWER(src.client_name)
+        )
+        GROUP BY LOWER(src.client_name)
+    """)
+
+    cursor.execute("""
+        WITH duplicates AS (
+            SELECT
+                MIN(id) AS keep_id,
+                LOWER(name) AS normalized_name
+            FROM clients
+            GROUP BY LOWER(name)
+            HAVING COUNT(*) > 1
+        )
+        UPDATE appointments
+        SET client_id = (
+            SELECT d.keep_id
+            FROM duplicates d
+            JOIN clients c ON LOWER(c.name) = d.normalized_name
+            WHERE c.id = appointments.client_id
+            LIMIT 1
+        )
+        WHERE client_id IN (
+            SELECT c.id
+            FROM clients c
+            JOIN duplicates d ON LOWER(c.name) = d.normalized_name
+            WHERE c.id != d.keep_id
+        )
+    """)
+
+    cursor.execute("""
+        DELETE FROM clients
+        WHERE id IN (
+            SELECT c.id
+            FROM clients c
+            JOIN (
+                SELECT MIN(id) AS keep_id, LOWER(name) AS normalized_name
+                FROM clients
+                GROUP BY LOWER(name)
+                HAVING COUNT(*) > 1
+            ) d
+            ON LOWER(c.name) = d.normalized_name
+            WHERE c.id != d.keep_id
+        )
+    """)
+
+    cursor.execute("""
+        UPDATE appointments
+        SET client_id = (
+            SELECT c.id
+            FROM clients c
+            WHERE LOWER(c.name) = LOWER(COALESCE(appointments.client_name_snapshot, appointments.client_name))
+            LIMIT 1
+        )
+        WHERE client_id IS NULL
+          AND COALESCE(client_name_snapshot, client_name) IS NOT NULL
+    """)
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -63,6 +215,28 @@ def init_database() -> None:
                 end_time TEXT NOT NULL
             )
         """)
+        _migrate_appointments_schema(cursor)
+
+        # Clients table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                phone TEXT,
+                email TEXT,
+                birthday TEXT,
+                notes TEXT,
+                marketing_opt_in INTEGER NOT NULL DEFAULT 0,
+                preferred_stylist_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_visit_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                FOREIGN KEY (preferred_stylist_id) REFERENCES stylists (id)
+            )
+        """)
+        _migrate_clients_schema(cursor)
         
         # Users table
         cursor.execute("""
@@ -127,6 +301,26 @@ def init_database() -> None:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_start_time
             ON appointments(start_time)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_appointments_stylist_start
+            ON appointments(stylist_id, start_time)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_appointments_service
+            ON appointments(service_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_appointments_client
+            ON appointments(client_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_clients_user_id
+            ON clients(user_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_clients_phone
+            ON clients(phone)
         """)
         
         conn.commit()
@@ -197,7 +391,13 @@ def add_appointment(
     client_name: str,
     service_name: str,
     start_time: str,
-    end_time: str
+    end_time: str,
+    client_id: int = None,
+    client_user_id: int = None,
+    stylist_id: int = None,
+    service_id: int = None,
+    notes: str = None,
+    status: str = "booked",
 ) -> int:
     """
     Add a new appointment to the database.
@@ -225,9 +425,39 @@ def add_appointment(
     
     try:
         cursor.execute("""
-            INSERT INTO appointments (client_name, service_name, start_time, end_time)
-            VALUES (?, ?, ?, ?)
-        """, (client_name, service_name, start_time, end_time))
+            INSERT INTO appointments (
+                client_name,
+                service_name,
+                start_time,
+                end_time,
+                client_id,
+                client_user_id,
+                stylist_id,
+                service_id,
+                client_name_snapshot,
+                service_name_snapshot,
+                status,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            client_name,
+            service_name,
+            start_time,
+            end_time,
+            client_id,
+            client_user_id,
+            stylist_id,
+            service_id,
+            client_name,
+            service_name,
+            status,
+            notes,
+            datetime.now().isoformat(),
+            datetime.now().isoformat(),
+        ))
         
         conn.commit()
         appointment_id = cursor.lastrowid
@@ -257,7 +487,22 @@ def get_appointment(appointment_id: int) -> Dict:
     
     try:
         cursor.execute("""
-            SELECT id, client_name, service_name, start_time, end_time
+            SELECT
+                id,
+                client_name,
+                service_name,
+                start_time,
+                end_time,
+                client_id,
+                client_user_id,
+                stylist_id,
+                service_id,
+                client_name_snapshot,
+                service_name_snapshot,
+                status,
+                notes,
+                created_at,
+                updated_at
             FROM appointments
             WHERE id = ?
         """, (appointment_id,))
@@ -313,7 +558,22 @@ def get_all_appointments() -> List[Dict]:
     
     try:
         cursor.execute("""
-            SELECT id, client_name, service_name, start_time, end_time
+            SELECT
+                id,
+                client_name,
+                service_name,
+                start_time,
+                end_time,
+                client_id,
+                client_user_id,
+                stylist_id,
+                service_id,
+                client_name_snapshot,
+                service_name_snapshot,
+                status,
+                notes,
+                created_at,
+                updated_at
             FROM appointments
             ORDER BY start_time ASC
         """)
@@ -374,17 +634,250 @@ def insert_user(name: str, phone: str, password_hash: str, role: str) -> int:
     cursor = conn.cursor()
     
     try:
+        normalized_phone = normalize_phone(phone)
         created_at = datetime.now().isoformat()
         cursor.execute("""
             INSERT INTO users (name, phone, password_hash, role, created_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (name, phone, password_hash, role, created_at))
+        """, (name, normalized_phone, password_hash, role, created_at))
         
         conn.commit()
         return cursor.lastrowid
         
     except sqlite3.Error as e:
         logger.error(f"Error inserting user: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def upsert_client(
+    name: str,
+    user_id: int = None,
+    phone: str = None,
+    email: str = None,
+    birthday: str = None,
+    notes: str = None,
+    marketing_opt_in: bool = False,
+    preferred_stylist_id: int = None,
+) -> int:
+    """Create or update a client record and return the client ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        normalized_name = (name or "").strip()
+        if not normalized_name:
+            raise ValueError("Client name is required")
+        normalized_phone = normalize_phone(phone) if phone else None
+
+        existing = None
+        if user_id is not None:
+            cursor.execute("SELECT id FROM clients WHERE user_id = ?", (user_id,))
+            existing = cursor.fetchone()
+        if existing is None and normalized_phone:
+            cursor.execute("SELECT id FROM clients WHERE phone = ?", (normalized_phone,))
+            existing = cursor.fetchone()
+        if existing is None:
+            cursor.execute("SELECT id FROM clients WHERE LOWER(name) = LOWER(?)", (normalized_name,))
+            existing = cursor.fetchone()
+
+        timestamp = datetime.now().isoformat()
+        if existing:
+            client_id = existing["id"]
+            cursor.execute("""
+                UPDATE clients
+                SET
+                    user_id = COALESCE(?, user_id),
+                    name = ?,
+                    phone = COALESCE(?, phone),
+                    email = COALESCE(?, email),
+                    birthday = COALESCE(?, birthday),
+                    notes = COALESCE(?, notes),
+                    marketing_opt_in = COALESCE(?, marketing_opt_in),
+                    preferred_stylist_id = COALESCE(?, preferred_stylist_id),
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                user_id,
+                normalized_name,
+                normalized_phone,
+                email,
+                birthday,
+                notes,
+                1 if marketing_opt_in else None,
+                preferred_stylist_id,
+                timestamp,
+                client_id,
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO clients (
+                    user_id,
+                    name,
+                    phone,
+                    email,
+                    birthday,
+                    notes,
+                    marketing_opt_in,
+                    preferred_stylist_id,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                normalized_name,
+                normalized_phone,
+                email,
+                birthday,
+                notes,
+                1 if marketing_opt_in else 0,
+                preferred_stylist_id,
+                timestamp,
+                timestamp,
+            ))
+            client_id = cursor.lastrowid
+
+        conn.commit()
+        return client_id
+
+    except sqlite3.Error as e:
+        logger.error(f"Error upserting client: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_all_clients() -> List[Dict]:
+    """Retrieve all clients with their profile details."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT
+                c.id,
+                c.user_id,
+                c.name,
+                c.phone,
+                c.email,
+                c.birthday,
+                c.notes,
+                c.marketing_opt_in,
+                c.preferred_stylist_id,
+                c.created_at,
+                c.updated_at,
+                c.last_visit_at
+            FROM clients c
+            ORDER BY c.name ASC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving clients: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_client_by_phone(phone: str) -> Dict:
+    """Retrieve a client by phone number."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        normalized_phone = normalize_phone(phone)
+        cursor.execute("""
+            SELECT
+                id,
+                user_id,
+                name,
+                phone,
+                email,
+                birthday,
+                notes,
+                marketing_opt_in,
+                preferred_stylist_id,
+                created_at,
+                updated_at,
+                last_visit_at
+            FROM clients
+            WHERE phone = ?
+            LIMIT 1
+        """, (normalized_phone,))
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving client by phone: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_client_by_name(name: str) -> Dict:
+    """Retrieve a client by exact case-insensitive name."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT
+                id,
+                user_id,
+                name,
+                phone,
+                email,
+                birthday,
+                notes,
+                marketing_opt_in,
+                preferred_stylist_id,
+                created_at,
+                updated_at,
+                last_visit_at
+            FROM clients
+            WHERE LOWER(name) = LOWER(?)
+            LIMIT 1
+        """, (name,))
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving client by name: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_client_history(client_id: int) -> List[Dict]:
+    """Retrieve a client's appointment history."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT
+                a.id,
+                a.client_id,
+                a.client_name_snapshot,
+                a.service_name_snapshot,
+                a.service_id,
+                a.stylist_id,
+                a.start_time,
+                a.end_time,
+                a.status,
+                a.notes,
+                a.created_at,
+                a.updated_at
+            FROM appointments a
+            WHERE a.client_id = ?
+            ORDER BY a.start_time DESC
+        """, (client_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving client history: {e}")
         raise
     finally:
         conn.close()
@@ -405,11 +898,12 @@ def get_user_by_phone(phone: str) -> Dict:
     cursor = conn.cursor()
     
     try:
+        normalized_phone = normalize_phone(phone)
         cursor.execute("""
             SELECT id, name, phone, password_hash, role, created_at
             FROM users
             WHERE phone = ?
-        """, (phone,))
+        """, (normalized_phone,))
         
         row = cursor.fetchone()
         return dict(row) if row else {}
@@ -631,6 +1125,29 @@ def get_all_stylists() -> List[Dict]:
         conn.close()
 
 
+def get_stylist_by_id(stylist_id: int) -> Dict:
+    """Retrieve a stylist by ID with the associated display name."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT s.id, s.user_id, u.name, s.bio, s.experience_years, s.created_at
+            FROM stylists s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.id = ?
+            LIMIT 1
+        """, (stylist_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving stylist by id: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def get_services_for_stylist(stylist_id: int) -> List[Dict]:
     """Retrieve services offered by a specific stylist.
 
@@ -768,7 +1285,14 @@ def create_appointment_if_available(
     service_duration: int,
     working_hours: Dict[str, str],
     min_service_duration: int,
-    date: str
+    date: str,
+    client_id: int = None,
+    client_user_id: int = None,
+    stylist_id: int = None,
+    service_id: int = None,
+    client_phone: str = None,
+    client_email: str = None,
+    notes: str = None,
 ) -> Dict:
     """
     Create an appointment ONLY if the requested time slot is available.
@@ -843,17 +1367,45 @@ def create_appointment_if_available(
         if slot_is_available:
             # STEP 4: Requested slot is available - proceed with appointment creation
             # Insert the appointment into the database
+            effective_client_id = client_id or upsert_client(
+                name=client_name,
+                user_id=client_user_id,
+                phone=client_phone,
+                email=client_email,
+                notes=notes,
+                preferred_stylist_id=stylist_id,
+            )
             appointment_id = add_appointment(
                 client_name=client_name,
                 service_name=service_name,
                 start_time=start_time,
-                end_time=end_time
+                end_time=end_time,
+                client_id=effective_client_id,
+                client_user_id=client_user_id,
+                stylist_id=stylist_id,
+                service_id=service_id,
+                notes=notes,
             )
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    UPDATE clients
+                    SET
+                        last_visit_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                """, (start_time, datetime.now().isoformat(), effective_client_id))
+                conn.commit()
+            finally:
+                conn.close()
             
             # Return success with the new appointment ID
             return {
                 "success": True,
-                "appointment_id": appointment_id
+                "appointment_id": appointment_id,
+                "client_id": effective_client_id,
             }
         else:
             # STEP 5: Requested slot is NOT available - reject appointment

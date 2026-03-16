@@ -65,8 +65,13 @@ class AvailableSlotsResponse(BaseModel):
 class BookAppointmentRequest(BaseModel):
     """Request model for booking an appointment"""
     client_name: str
+    client_id: Optional[int] = None
     stylist_id: int
     service_id: int
+    client_user_id: Optional[int] = None
+    client_phone: Optional[str] = None
+    client_email: Optional[str] = None
+    notes: Optional[str] = None
     start_time: str  # YYYY-MM-DD HH:MM format
     end_time: str    # YYYY-MM-DD HH:MM format
     date: str  # YYYY-MM-DD format
@@ -362,7 +367,14 @@ def book_appointment(request: BookAppointmentRequest):
             service_duration=service_duration,
             working_hours=WORKING_HOURS,
             min_service_duration=MIN_SERVICE_DURATION,
-            date=request.date
+            date=request.date,
+            client_id=request.client_id,
+            client_user_id=request.client_user_id,
+            stylist_id=request.stylist_id,
+            service_id=request.service_id,
+            client_phone=request.client_phone,
+            client_email=request.client_email,
+            notes=request.notes,
         )
         
         # Return result from database function

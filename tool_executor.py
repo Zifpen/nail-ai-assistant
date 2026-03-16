@@ -245,7 +245,9 @@ class ToolExecutor:
         resolved_service = self.context.get("resolved_service", {})
         available_slots = self.context["results"].get("get_available_slots") or context.get("available_slots", {})
         stylists = self.context["results"].get("get_stylists", [])
-        client_name = "AI Assistant Test User"
+        client_name = context.get("client_name") or "Walk-in Client"
+        client_id = context.get("client_id")
+        client_phone = context.get("client_phone")
         service_id = context.get("service_id") or resolved_service.get("service_id")
         if not service_id:
             raise ValueError("No service_id available for booking")
@@ -273,8 +275,10 @@ class ToolExecutor:
 
         payload = {
             "client_name": client_name,
+            "client_id": client_id,
             "stylist_id": stylist_id,
             "service_id": service_id,
+            "client_phone": client_phone,
             "start_time": start_time,
             "end_time": end_time,
             "date": date

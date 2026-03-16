@@ -83,7 +83,45 @@ class IntentDetector:
                 return datetime.strptime(cleaned, fmt).strftime("%H:%M")
             except ValueError:
                 continue
+
+        if cleaned.isdigit():
+            inferred = self._infer_numeric_time(cleaned)
+            if inferred:
+                return inferred
         return None
+
+    def _infer_numeric_time(self, digits: str) -> Optional[str]:
+        """Infer salon-style shorthand like 3 -> 15:00 or 315 -> 15:15."""
+        if len(digits) > 4:
+            return None
+
+        hour = None
+        minute = 0
+
+        if len(digits) <= 2:
+            hour = int(digits)
+        elif len(digits) == 3:
+            hour = int(digits[0])
+            minute = int(digits[1:])
+        elif len(digits) == 4:
+            hour = int(digits[:2])
+            minute = int(digits[2:])
+
+        if hour is None or minute >= 60:
+            return None
+
+        if 1 <= hour <= 7:
+            hour += 12
+        elif hour == 12:
+            hour = 12
+        elif 8 <= hour <= 11:
+            hour = hour
+        elif 13 <= hour <= 23:
+            hour = hour
+        else:
+            return None
+
+        return f"{hour:02d}:{minute:02d}"
 
     # --- Improved stylist and service detection ---
     KNOWN_STYLISTS = ["anna", "mia", "test stylist 2"]
@@ -166,13 +204,25 @@ class IntentDetector:
 
     def _extract_time(self, message: str) -> Optional[str]:
         """Extract a time or time range from message."""
-        time_range_match = re.search(r"(\d{1,2}:\d{2}\s*[-to]+\s*\d{1,2}:\d{2})", message.lower())
-        if time_range_match:
-            return time_range_match.group(1).replace(" ", "")
+        working_message = message.split("User:")[-1] if "User:" in message else message
+        working_message = working_message.strip()
+        working_lower = working_message.lower()
 
-        time_match = re.search(r"\b(\d{1,2}:\d{2})\b", message)
+        time_range_match = re.search(
+            r"\b(\d{1,4}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|to)\s*(\d{1,4}(?::\d{2})?\s*(?:am|pm)?)\b",
+            working_lower,
+        )
+        if time_range_match:
+            start_time = self._parse_loose_time(time_range_match.group(1))
+            end_time = self._parse_loose_time(time_range_match.group(2))
+            if start_time and end_time:
+                return f"{start_time}-{end_time}"
+
+        time_match = re.search(r"\b(\d{1,4}(?::\d{2})?\s*(?:am|pm)?)\b", working_lower)
         if time_match:
-            return time_match.group(1)
+            parsed_time = self._parse_loose_time(time_match.group(1))
+            if parsed_time:
+                return parsed_time
 
         return None
 
