@@ -25,9 +25,11 @@ from database import (
     create_service,
     create_stylist_service,
     create_stylist_profile,
+    update_stylist_profile,
     get_stylist_service,
     get_all_services,
     get_all_stylists,
+    get_stylist_by_phone,
     get_services_for_stylist
 )
 from service_resolver import resolve_service_name
@@ -120,6 +122,19 @@ class StylistOnboardingRequest(BaseModel):
     """Request model for stylist service onboarding"""
     stylist_id: int
     services: List[ServiceItem]
+
+
+class StylistProfileOnboardingRequest(BaseModel):
+    """Request model for stylist profile onboarding"""
+    stylist_id: int
+    bio: str
+    experience_years: int = 0
+
+
+class StylistProfileOnboardingResponse(BaseModel):
+    """Response model for stylist profile onboarding"""
+    message: str
+    stylist_id: int
 
 
 class StylistOnboardingResponse(BaseModel):
@@ -535,6 +550,44 @@ def login_user(request: LoginRequest):
 
 
 @app.post(
+    "/stylist/onboarding/profile",
+    response_model=StylistProfileOnboardingResponse,
+    tags=["Stylist Onboarding"]
+)
+def stylist_onboarding_profile(request: StylistProfileOnboardingRequest):
+    """
+    Save or update a stylist profile used for recommendations.
+    """
+    try:
+        if request.experience_years < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="experience_years must be 0 or greater"
+            )
+
+        update_stylist_profile(
+            stylist_id=request.stylist_id,
+            bio=request.bio,
+            experience_years=request.experience_years,
+        )
+
+        return StylistProfileOnboardingResponse(
+            message=f"Successfully updated profile for stylist {request.stylist_id}",
+            stylist_id=request.stylist_id,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during stylist profile onboarding: {str(e)}"
+        )
+
+
+@app.post(
     "/stylist/onboarding/services",
     response_model=StylistOnboardingResponse,
     tags=["Stylist Onboarding"]
@@ -624,11 +677,39 @@ def get_stylists():
     """
     try:
         stylists = get_all_stylists()
-        return [{"id": s["id"], "name": s["name"]} for s in stylists]
+        return [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "bio": s.get("bio", ""),
+                "experience_years": s.get("experience_years", 0),
+            }
+            for s in stylists
+        ]
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving stylists: {str(e)}"
+        )
+
+
+@app.get(
+    "/stylists/by-phone/{phone}",
+    tags=["Stylists"]
+)
+def get_stylist_by_phone_endpoint(phone: str):
+    """Get a stylist profile by phone number."""
+    try:
+        stylist = get_stylist_by_phone(phone)
+        if not stylist:
+            raise HTTPException(status_code=404, detail="Stylist not found")
+        return stylist
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving stylist by phone: {str(e)}"
         )
 
 

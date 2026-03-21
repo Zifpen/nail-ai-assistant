@@ -44,6 +44,8 @@ class ActionPlanner:
             List[str]: The next action to execute.
         """
         if not context.get("service_id"):
+            if not context.get("service"):
+                return ["ask_service"]
             return ["resolve_service"]
 
         if not context.get("stylist_id"):

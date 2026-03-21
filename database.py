@@ -215,7 +215,6 @@ def init_database() -> None:
                 end_time TEXT NOT NULL
             )
         """)
-        _migrate_appointments_schema(cursor)
 
         # Clients table
         cursor.execute("""
@@ -236,7 +235,6 @@ def init_database() -> None:
                 FOREIGN KEY (preferred_stylist_id) REFERENCES stylists (id)
             )
         """)
-        _migrate_clients_schema(cursor)
         
         # Users table
         cursor.execute("""
@@ -286,6 +284,10 @@ def init_database() -> None:
                 FOREIGN KEY (service_id) REFERENCES services (id)
             )
         """)
+
+        # Run migrations only after dependent tables exist.
+        _migrate_appointments_schema(cursor)
+        _migrate_clients_schema(cursor)
         
         # Conversations table for conversation memory
         cursor.execute("""
@@ -1042,6 +1044,31 @@ def create_stylist_profile(user_id: int) -> int:
         conn.close()
 
 
+def update_stylist_profile(stylist_id: int, bio: str = "", experience_years: int = 0) -> None:
+    """Update an existing stylist profile."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        normalized_bio = (bio or "").strip()
+        normalized_experience = max(0, int(experience_years or 0))
+        cursor.execute("""
+            UPDATE stylists
+            SET bio = ?, experience_years = ?
+            WHERE id = ?
+        """, (normalized_bio, normalized_experience, stylist_id))
+        if cursor.rowcount == 0:
+            raise ValueError(f"Stylist {stylist_id} not found")
+
+        conn.commit()
+
+    except (sqlite3.Error, ValueError) as e:
+        logger.error(f"Error updating stylist profile: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def get_service_by_name(name: str) -> Dict:
     """Retrieve a service by name.
 
@@ -1143,6 +1170,30 @@ def get_stylist_by_id(stylist_id: int) -> Dict:
 
     except sqlite3.Error as e:
         logger.error(f"Error retrieving stylist by id: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def get_stylist_by_phone(phone: str) -> Dict:
+    """Retrieve a stylist by phone number with joined user profile data."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        normalized_phone = normalize_phone(phone)
+        cursor.execute("""
+            SELECT s.id, s.user_id, u.name, u.phone, s.bio, s.experience_years, s.created_at
+            FROM stylists s
+            JOIN users u ON s.user_id = u.id
+            WHERE u.phone = ?
+            LIMIT 1
+        """, (normalized_phone,))
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving stylist by phone: {e}")
         raise
     finally:
         conn.close()

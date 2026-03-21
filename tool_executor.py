@@ -146,6 +146,7 @@ class ToolExecutor:
 
         self.context["context"]["stylists_retrieved"] = True
         self.context["context"]["available_stylists"] = stylists
+        self.context["context"]["no_stylists_available"] = not bool(stylists)
 
         return stylists
 

@@ -40,6 +40,7 @@ from database import (
     get_client_history,
     get_services_for_stylist,
     get_stylist_by_id,
+    init_database,
     normalize_phone,
     upsert_client,
 )
@@ -107,6 +108,12 @@ class NailSalonAgent:
             "i have no idea",
             "no idea",
             "not sure",
+            "i don't know",
+            "any stylist",
+            "whoever is available",
+            "whoever's available",
+            "anyone",
+            "doesn't matter",
             "recommend",
             "can you recommend",
             "who do you recommend",
@@ -318,6 +325,16 @@ class NailSalonAgent:
             if self.client_profile.get(key) not in [None, "", []]:
                 context[key] = self.client_profile[key]
 
+        try:
+            normalized_message_phone = normalize_phone(user_message)
+        except ValueError:
+            normalized_message_phone = None
+
+        if normalized_message_phone:
+            if normalized_message_phone == context.get("client_phone"):
+                return "I already have your phone number on file. What would you like to book today?"
+            return "Thanks. I already have the phone number step covered. What service would you like to book today?"
+
         if self._is_last_appointment_question(user_message):
             return self._build_last_appointment_response(context)
 
@@ -403,7 +420,7 @@ class NailSalonAgent:
                         return recommendation_text
                 stylists = context.get("available_stylists", [])
                 if not stylists:
-                    return "Which stylist would you like to book with?"
+                    return "I couldn't find any available stylists for that service right now."
 
                 stylist_names = ", ".join(stylist["name"] for stylist in stylists)
                 return f"Which stylist would you like to book with? Available stylists: {stylist_names}."
@@ -580,6 +597,8 @@ def run_agent():
     """
     Main conversation loop for the AI agent using the three-layer architecture.
     """
+    init_database()
+
     print("Welcome to the Nail Salon AI Assistant!")
     print("This agent uses a structured three-layer architecture:")
     print("🔍 Intent Layer → 📝 Planner → ⚡ Tool Executor")
